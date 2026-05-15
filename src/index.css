@@ -1,0 +1,195 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ----------------------------------------------------
+   1. CONFIGURACIÓN BASE Y SCROLLBARS MINIMALISTAS
+   ---------------------------------------------------- */
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(122, 21, 49, 0.2); /* Tono primary diluido */
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(122, 21, 49, 0.4);
+}
+
+/* Modo oscuro para scrollbars */
+.dark ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); }
+.dark ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* ----------------------------------------------------
+   2. CABECERA PRINCIPAL (HEADER) Y GLASSMORPHISM
+   ---------------------------------------------------- */
+@layer utilities {
+  /* Gradiente principal del corporativo */
+  .header-gradient {
+    background: linear-gradient(135deg, #7a1531 0%, #5a0f24 100%);
+    position: relative;
+    overflow: hidden;
+    transition: background 0.3s ease;
+  }
+
+  .dark .header-gradient {
+    background: linear-gradient(135deg, #3a1520 0%, #260f15 100%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  /* Variante: Cabecera Modo Supervisor (Ámbar oscuro) */
+  .header-gradient-supervisor {
+    background: linear-gradient(135deg, #78350f 0%, #451a03 60%, #7a1531 100%) !important;
+    position: relative;
+    overflow: hidden;
+    transition: background 0.6s ease;
+  }
+  
+  .dark .header-gradient-supervisor {
+    background: linear-gradient(135deg, #3a200a 0%, #1c0a02 60%, #3a1520 100%) !important;
+    border-bottom: 1px solid rgba(245, 158, 11, 0.1);
+  }
+
+  /* Círculos decorativos para el fondo del header (Efecto profundidad) */
+  .semi-circle-1 {
+    position: absolute; width: 300px; height: 300px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0) 70%);
+    top: -150px; right: -50px;
+  }
+
+  .semi-circle-2 {
+    position: absolute; width: 200px; height: 200px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0) 70%);
+    bottom: -100px; left: 10%;
+  }
+}
+
+/* ----------------------------------------------------
+   3. BOTONES Y SELECTORES CON BLUR EFECT
+   ---------------------------------------------------- */
+.drive-mode-selector {
+  display: flex;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px); /* Cristal */
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px; padding: 3px; gap: 2px;
+}
+
+.drive-mode-btn {
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px 12px; border-radius: 8px; font-size: 11px; font-weight: 800;
+  color: rgba(255, 255, 255, 0.6); transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  text-transform: uppercase; letter-spacing: 0.05em; background: transparent; cursor: pointer;
+}
+
+.drive-mode-btn:hover { color: rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.06); }
+.drive-mode-btn.active.admin-active {
+  background: rgba(255, 255, 255, 0.18); color: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+.drive-mode-btn.active.supervisor-active {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.3), rgba(217, 119, 6, 0.2));
+  color: #fbbf24;
+  box-shadow: 0 2px 12px rgba(245, 158, 11, 0.3), inset 0 1px 0 rgba(251, 191, 36, 0.2);
+}
+
+/* ----------------------------------------------------
+   4. BARRAS DE PROGRESO ANIMADAS (SHIMMER)
+   ---------------------------------------------------- */
+.sync-progress-container {
+  flex: 1; min-width: 200px; height: 22px; border-radius: 11px; overflow: hidden;
+  position: relative; background: #f1f5f9; border: 1px solid #e2e8f0;
+}
+.dark .sync-progress-container { background: #1e293b; border-color: #475569; }
+
+.sync-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #7a1531, #b91c5c, #7a1531);
+  background-size: 200% 100%;
+  animation: syncShimmer 1.5s ease infinite; /* Animación continua de brillo */
+  border-radius: 11px; transition: width 0.3s ease; box-shadow: 0 0 12px rgba(122, 21, 49, 0.4);
+}
+
+.sync-progress-text {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 800; text-transform: uppercase; mix-blend-mode: difference; color: white;
+}
+
+@keyframes syncShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* ----------------------------------------------------
+   5. TARJETAS Y COMPONENTES NEÓN / PULSE
+   ---------------------------------------------------- */
+.supervisor-aura { position: relative; }
+.supervisor-aura::before {
+  content: ''; position: absolute; inset: -1px; border-radius: inherit; border: 2px solid transparent;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.25), rgba(251, 191, 36, 0.08), rgba(245, 158, 11, 0.25)) border-box;
+  -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0); -webkit-mask-composite: xor;
+  pointer-events: none; animation: auralPulse 3s ease-in-out infinite;
+}
+
+@keyframes auralPulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+
+/* Tarjetas Flash Hover Effect */
+.kpi-card { position: relative; overflow: hidden; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1); }
+.kpi-card::after {
+  content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+  transition: left 0.6s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(122, 21, 49, 0.1);
+  border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(122, 21, 49, 0.3);
+}
+
+/* Glassmorphism utilities */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.dark .glass-panel {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+
+@keyframes bounce-subtle {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+.animate-bounce-subtle {
+  animation: bounce-subtle 2s infinite ease-in-out;
+}
