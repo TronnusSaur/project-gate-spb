@@ -235,11 +235,11 @@ const ConflictResolverModal = ({
                     <div className="grid grid-cols-2 gap-y-3 gap-x-2 text-xs">
                       <div>
                         <span className="block text-[10px] text-slate-400 uppercase font-medium">Empresa</span>
-                        <span className="font-bold text-slate-700 dark:text-slate-300">{conflict.gateRow.Empresa || '---'}</span>
+                        <span className="font-bold text-slate-700 dark:text-slate-300">{conflict.gateRow.EMPRESA || '---'}</span>
                       </div>
                       <div>
                         <span className="block text-[10px] text-slate-400 uppercase font-medium">Contrato (ID)</span>
-                        <span className="font-bold text-slate-700 dark:text-slate-300">{conflict.gateRow['No. Contrato'] || '---'}</span>
+                        <span className="font-bold text-slate-700 dark:text-slate-300">{conflict.gateRow.ID || '---'}</span>
                       </div>
                       <div className="col-span-2">
                         <span className="block text-[10px] text-slate-400 uppercase font-medium">Calle y Colonia</span>
@@ -263,7 +263,7 @@ const ConflictResolverModal = ({
                       </div>
                       <div>
                         <span className="block text-[10px] text-slate-400 uppercase font-medium">Fecha de Trabajo</span>
-                        <span className="font-semibold text-slate-700 dark:text-slate-300">{conflict.gateRow.fechaRealizado || '---'}</span>
+                        <span className="font-semibold text-slate-700 dark:text-slate-300">{conflict.gateRow.fecha || '---'}</span>
                       </div>
                     </div>
                   </div>
