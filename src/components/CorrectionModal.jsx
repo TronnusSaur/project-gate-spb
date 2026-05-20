@@ -246,7 +246,7 @@ const CorrectionModal = ({ isOpen, onClose, record, geoJsonData, contractMap, on
           </div>
 
           {/* Panel Derecho: Formulario Cuadriculado (Grid-based) */}
-          <div className="flex flex-col h-full bg-slate-50 dark:bg-slate-900/30">
+          <div className="flex flex-col h-full min-h-0 overflow-hidden bg-slate-50 dark:bg-slate-900/30">
             <div className="p-5 overflow-y-auto flex-grow custom-scrollbar">
               <div className="flex flex-col gap-3 mb-5">
                 <div className="flex items-center justify-between">

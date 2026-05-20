@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Header from './components/Header';
 import CorrectionModal from './components/CorrectionModal';
-import { UploadCloud, FileUp, Database, MapPin, AlertTriangle, Hash, Play, CheckCircle, XCircle, Download, List, Eye } from 'lucide-react';
+import ConflictResolverModal from './components/ConflictResolverModal';
+import { UploadCloud, FileUp, Database, MapPin, AlertTriangle, Hash, Play, CheckCircle, XCircle, Download, List, Eye, Trash2, Settings, Loader2, Globe, CloudLightning, ExternalLink } from 'lucide-react';
 import Papa from 'papaparse';
 import { point, booleanPointInPolygon, buffer } from '@turf/turf';
 
@@ -23,7 +24,10 @@ function App() {
   const [geoJsonData, setGeoJsonData] = useState(null);
   const [colonyCatalog, setColonyCatalog] = useState([]);
   const [contractMap, setContractMap] = useState({});
+  const [dominantContract, setDominantContract] = useState(null);
+  const [dominantEmpresa, setDominantEmpresa] = useState('');
   const [showErrors, setShowErrors] = useState(false);
+  const [activeTab, setActiveTab] = useState('errors');
   
   const [kpis, setKpis] = useState({
     total: 0,
@@ -38,11 +42,25 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [headers, setHeaders] = useState([]);
   
+  // Estados de Sincronización con Google Sheets (Base de Datos)
+  const [webAppUrl, setWebAppUrl] = useState(() => localStorage.getItem('gate_web_app_url') || '');
+  const [showSettings, setShowSettings] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStep, setUploadStep] = useState('');
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [conflictData, setConflictData] = useState([]);
+  const [showConflictResolver, setShowConflictResolver] = useState(false);
+  const [uploadSuccessInfo, setUploadSuccessInfo] = useState(null);
+  
   const inputRef = useRef(null);
 
   // Derived state for errors
   const errorRecords = useMemo(() => {
     return allRecords.filter(r => r._error);
+  }, [allRecords]);
+
+  const correctRecords = useMemo(() => {
+    return allRecords.filter(r => !r._error);
   }, [allRecords]);
 
   useEffect(() => {
@@ -149,6 +167,9 @@ function App() {
     setFile(selectedFile);
     setResults(null);
     setShowErrors(false);
+    setDominantContract(null);
+    setDominantEmpresa('');
+    setActiveTab('errors');
     setKpis({ total: 0, fueraPoligono: 0, errorPosicionamiento: 0, foliosInvalidos: 0 });
   };
 
@@ -166,10 +187,226 @@ function App() {
     document.body.removeChild(link);
   };
 
-  const validateRecord = (row, geoData) => {
+  const getExportFilename = (isDevMode) => {
+    const contrato = dominantContract || 'CONTRATO';
+    const empresa = dominantEmpresa || 'EMPRESA';
+    const semana = "Semana X";
+    if (isDevMode) {
+      return `${contrato}_${empresa}_${semana}_Dev Mode.csv`;
+    }
+    return `${contrato}_${empresa}_${semana}.csv`;
+  };
+
+  const exportOriginal = () => {
+    if (!allRecords || allRecords.length === 0) return;
+    const filename = getExportFilename(false);
+    const cleanedData = allRecords.map(r => {
+      const copy = { ...r };
+      delete copy.id;
+      delete copy._error;
+      return copy;
+    });
+    exportToCSV(cleanedData, filename);
+  };
+
+  const exportDevMode = () => {
+    if (!allRecords || allRecords.length === 0) return;
+    const devModeData = allRecords.map(r => mapRowToDevMode(r));
+    const filename = getExportFilename(true);
+    exportToCSV(devModeData, filename);
+  };
+
+  const mapRowToDevMode = (r) => {
+    const tipoDocVal = r['Solicitud Atendida'] || r['solicitud atendida'] || r['Solicitud atendida'] || r['SOLICITUD ATENDIDA'] || '';
+    let lat = '', lon = '';
+    if (r['GEOLOCALIZACION'] && r['GEOLOCALIZACION'].includes(',')) {
+      const parts = r['GEOLOCALIZACION'].split(',').map(s => s.trim());
+      if (parts.length === 2) {
+        lat = parts[0];
+        lon = parts[1];
+      }
+    }
+    return {
+      ID: r['No. Contrato'] || dominantContract || '',
+      EMPRESA: r['Empresa'] || dominantEmpresa || '',
+      idEmpresa: '',
+      idResponsable: '',
+      idDocRef: '',
+      tipoDocRef: tipoDocVal,
+      folioRef: r['folio'] || '',
+      idBacheo: '',
+      idDelegacion: '',
+      fecha: r['fechaRealizado'] || r['fecha'] || '',
+      estatus: 'T',
+      folio: r['folio'] || '',
+      latitude: lat,
+      longitude: lon,
+      GEOLOCALIZACION: r['GEOLOCALIZACION'] || '',
+      calle: r['calle'] || r['CALLE'] || '',
+      delegacion: r['delegacion'] || r['DELEGACION'] || '',
+      colonia: r['colonia'] || r['COLONIA'] || '',
+      tipo: r['Tipo'] || r['tipo'] || '',
+      largo: r['largo'] || r['LARGO'] || '',
+      ancho: r['ancho'] || r['ANCHO'] || '',
+      profundidad: r['profundidad'] || r['PROFUNDIDAD'] || '',
+      m2total: r['m2total'] || r['M2TOTAL'] || ''
+    };
+  };
+
+  const handleDatabaseSend = async () => {
+    if (!webAppUrl) {
+      alert("Por favor, configura la URL de la Web App de Google Apps Script primero.");
+      setShowSettings(true);
+      return;
+    }
+
+    if (errorRecords.length > 0) {
+      alert("Debes corregir todos los errores en Cuarentena antes de enviar a la base de datos.");
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(15);
+    setUploadStep("Inicializando conexión con Google Sheets...");
+
+    try {
+      // Obtener lista de folios a enviar
+      const folios = allRecords.map(r => String(r.folio).trim());
+      
+      setUploadProgress(40);
+      setUploadStep("Comprobando folios duplicados en la hoja central...");
+
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "check_duplicates",
+          folios: folios
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error de servidor: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      if (data.status === "error") {
+        throw new Error(data.message || "Error al comprobar duplicados en Sheets.");
+      }
+
+      if (data.duplicates && data.duplicates.length > 0) {
+        setUploadProgress(60);
+        setUploadStep("Duplicados encontrados. Esperando resolución de Adrián...");
+        
+        // Mapear los duplicados con los registros actuales de GATE
+        const mappedConflicts = data.duplicates.map(dup => {
+          const matchedGate = allRecords.find(r => String(r.folio).trim() === String(dup.folio).trim());
+          return {
+            folio: dup.folio,
+            sheetRow: dup.sheetRow,
+            gateRow: matchedGate ? mapRowToDevMode(matchedGate) : {}
+          };
+        });
+
+        setConflictData(mappedConflicts);
+        setShowConflictResolver(true);
+        setUploading(false); // Detener el loader de progreso de carga mientras se reconcilia
+      } else {
+        // No hay duplicados en absoluto, proceder a insertar de forma directa
+        setUploadProgress(70);
+        setUploadStep("¡Excelente! No hay duplicados. Insertando registros en Sheets...");
+        
+        const appends = allRecords.map(r => mapRowToDevMode(r));
+        await executeWriteRecords(appends, []);
+      }
+    } catch (error) {
+      console.error("❌ Error de comunicación:", error);
+      alert(`Error al enviar a la base de datos: ${error.message}\nVerifica que la URL de la Web App sea correcta y que tenga permisos de ejecución ("Anyone").`);
+      setUploading(false);
+    }
+  };
+
+  const executeWriteRecords = async (appends, overwrites) => {
+    setUploading(true);
+    setUploadProgress(85);
+    setUploadStep("Inyectando registros en DEV y actualizando bitácora de UPLOAD TIMESTAMPS...");
+
+    try {
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "write_records",
+          appends: appends,
+          overwrites: overwrites
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error de servidor al escribir: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data.status === "error") {
+        throw new Error(data.message || "Error al escribir registros en Sheets.");
+      }
+
+      setUploadProgress(100);
+      setUploadStep("¡Sincronización completada exitosamente!");
+      setUploadSuccessInfo({
+        appendsCount: data.appendsCount || 0,
+        overwritesCount: data.overwritesCount || 0,
+        total: (data.appendsCount || 0) + (data.overwritesCount || 0)
+      });
+      
+      // Limpiar archivo para evitar doble carga accidental
+      setFile(null);
+      setAllRecords([]);
+      setResults(null);
+    } catch (error) {
+      console.error("❌ Error al escribir:", error);
+      alert(`Error al finalizar la escritura: ${error.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleResolveConflicts = async (appends, overwrites) => {
+    setShowConflictResolver(false);
+    // Filtrar los registros que no están en conflicto y agregarlos a los appends
+    const conflictFoliosSet = new Set(conflictData.map(c => c.folio));
+    const nonConflictAppends = allRecords
+      .filter(r => !conflictFoliosSet.has(String(r.folio).trim()))
+      .map(r => mapRowToDevMode(r));
+
+    const totalAppends = [...appends, ...nonConflictAppends];
+    
+    await executeWriteRecords(totalAppends, overwrites);
+  };
+
+  const validateRecord = (row, geoData, currentDominant = dominantContract) => {
     let isRed = false;
     let errors = [];
     let updatedRow = { ...row };
+
+    // ═══════════════════════════════════════════════════════════════
+    // -0. Autocorrección de Contrato Discrepante (Contrato Dominante)
+    // ═══════════════════════════════════════════════════════════════
+    if (currentDominant && updatedRow['No. Contrato']) {
+      const rowContract = String(updatedRow['No. Contrato']).trim().replace(/\D/g, '');
+      if (rowContract && rowContract !== currentDominant) {
+        console.log(`🩹 Autocorrigiendo No. Contrato discrepante para folio ${updatedRow['folio'] || 'sin-folio'}: ${rowContract} ➔ ${currentDominant}`);
+        updatedRow['No. Contrato'] = currentDominant;
+      }
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // 0. Normalización de Texto (Mayúsculas, sin acentos, preserva Ñ)
@@ -474,6 +711,60 @@ function App() {
         setHeaders(fileHeaders);
         const rows = data.slice(headerIdx + 1);
         
+        // Encontrar contrato dominante
+        let detectedDominant = null;
+        const contractHeaderIdx = fileHeaders.findIndex(h => h && h.trim() === 'No. Contrato');
+        if (contractHeaderIdx !== -1) {
+          const counts = {};
+          rows.forEach(rowArr => {
+            if (!rowArr || rowArr.length <= contractHeaderIdx) return;
+            const rawVal = rowArr[contractHeaderIdx];
+            if (rawVal) {
+              const val = String(rawVal).replace(/\D/g, '').trim();
+              if (val) {
+                counts[val] = (counts[val] || 0) + 1;
+              }
+            }
+          });
+          
+          let maxCount = 0;
+          Object.entries(counts).forEach(([val, count]) => {
+            if (count > maxCount) {
+              maxCount = count;
+              detectedDominant = val;
+            }
+          });
+        }
+        setDominantContract(detectedDominant);
+        console.log("🔍 Contrato dominante autodetectado:", detectedDominant);
+
+        // Encontrar empresa dominante
+        let detectedEmpresa = "";
+        const empresaHeaderIdx = fileHeaders.findIndex(h => h && normalizeText(h) === 'EMPRESA');
+        if (empresaHeaderIdx !== -1) {
+          const counts = {};
+          rows.forEach(rowArr => {
+            if (!rowArr || rowArr.length <= empresaHeaderIdx) return;
+            const rawVal = rowArr[empresaHeaderIdx];
+            if (rawVal) {
+              const val = normalizeText(rawVal);
+              if (val) {
+                counts[val] = (counts[val] || 0) + 1;
+              }
+            }
+          });
+          
+          let maxCount = 0;
+          Object.entries(counts).forEach(([val, count]) => {
+            if (count > maxCount) {
+              maxCount = count;
+              detectedEmpresa = val;
+            }
+          });
+        }
+        setDominantEmpresa(detectedEmpresa);
+        console.log("🔍 Empresa dominante autodetectada:", detectedEmpresa);
+        
         const processed = rows.map((rowArr, idx) => {
           let row = { id: idx };
           fileHeaders.forEach((h, i) => {
@@ -483,7 +774,7 @@ function App() {
           const rowStr = rowArr.join("").trim();
           if (rowStr === "" || rowArr[0] === "SEXTA SEMANA NO SE TRABAJO") return null;
 
-          return validateRecord(row, geoJsonData);
+          return validateRecord(row, geoJsonData, detectedDominant);
         }).filter(r => r !== null);
 
         setAllRecords(processed);
@@ -498,6 +789,21 @@ function App() {
     setAllRecords(prev => prev.map(r => r.id === reevaluated.id ? reevaluated : r));
     setIsModalOpen(false);
     setSelectedRecord(null);
+  };
+
+  const handleDeleteRecord = (id) => {
+    if (window.confirm("¿Estás seguro de que deseas eliminar este registro del listado?")) {
+      setAllRecords(prev => prev.filter(r => r.id !== id));
+    }
+  };
+
+  const handlePurgeGhosts = () => {
+    const ghostCount = allRecords.filter(r => r._error && r._error.includes("Caza de Fantasmas")).length;
+    if (ghostCount === 0) return;
+    
+    if (window.confirm(`¿Estás seguro de que deseas eliminar los ${ghostCount} folios fantasma detectados?`)) {
+      setAllRecords(prev => prev.filter(r => !r._error || !r._error.includes("Caza de Fantasmas")));
+    }
   };
 
   // Centralized KPI update
@@ -591,15 +897,60 @@ function App() {
             {/* Decorative background element */}
             <div className="absolute -top-24 -right-24 w-48 h-48 bg-primary/5 rounded-full blur-3xl group-hover:bg-primary/10 transition-colors duration-700" />
             
-            <div className="flex items-center gap-3 mb-6">
-              <div className="p-2.5 bg-slate-100 dark:bg-slate-700 rounded-xl">
-                <UploadCloud className="w-5 h-5 text-primary" />
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-slate-100 dark:bg-slate-700 rounded-xl">
+                  <UploadCloud className="w-5 h-5 text-primary" />
+                </div>
+                <div>
+                  <h3 className="font-black text-sm text-slate-800 dark:text-slate-100 uppercase tracking-widest">Puerta de Entrada</h3>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Ingesta de Datos CSV</p>
+                </div>
               </div>
-              <div>
-                <h3 className="font-black text-sm text-slate-800 dark:text-slate-100 uppercase tracking-widest">Puerta de Entrada</h3>
-                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Ingesta de Datos CSV</p>
-              </div>
+              <button
+                type="button"
+                onClick={() => setShowSettings(!showSettings)}
+                className={`p-2 rounded-xl transition-all border ${showSettings ? 'bg-primary/10 border-primary/20 text-primary' : 'bg-slate-100 dark:bg-slate-700 border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                title="Configuración de Base de Datos"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
             </div>
+
+            {/* Panel de Configuración de Google Sheets Premium */}
+            {showSettings && (
+              <div className="mb-6 p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800 animate-slide-down">
+                <div className="flex items-center gap-2 mb-2 text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                  <Globe className="w-3.5 h-3.5 text-primary" />
+                  <span>Enlace Google Apps Script Web App</span>
+                </div>
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 mb-3">
+                  Pega la URL obtenida al implementar tu Apps Script para la comunicación con Google Sheets.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={webAppUrl}
+                    onChange={(e) => {
+                      const url = e.target.value.trim();
+                      setWebAppUrl(url);
+                      localStorage.setItem('gate_web_app_url', url);
+                    }}
+                    placeholder="https://script.google.com/macros/s/.../exec"
+                    className="flex-grow px-3 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
+                  />
+                  {webAppUrl ? (
+                    <div className="px-3 py-2 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 rounded-xl border border-emerald-100 dark:border-emerald-900/50 flex items-center justify-center">
+                      <CheckCircle className="w-4 h-4" />
+                    </div>
+                  ) : (
+                    <div className="px-3 py-2 bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 rounded-xl border border-amber-100 dark:border-amber-900/50 flex items-center justify-center">
+                      <AlertTriangle className="w-4 h-4 animate-pulse" />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             <form 
               className={`border-2 border-dashed rounded-xl p-10 flex flex-col items-center justify-center text-center cursor-pointer transition-colors flex-grow
@@ -676,21 +1027,42 @@ function App() {
                        )}
                     </div>
                     
-                    <button 
-                      onClick={() => exportToCSV(allRecords, "REPORTE_FINAL_GATE.csv")}
-                      disabled={errorRecords.length > 0}
-                      className={`w-full py-3 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm
-                        ${errorRecords.length === 0 
-                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/20' 
-                          : 'bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed'}`}
-                    >
-                      <Download className="w-3 h-3" /> Exportar Archivo Final
-                    </button>
-                    
-                    {errorRecords.length > 0 && (
-                      <p className="text-[9px] text-center text-slate-400 dark:text-slate-500 italic">
-                        * Debes corregir todos los errores para habilitar la exportación.
-                      </p>
+                    {errorRecords.length === 0 ? (
+                      <div className="flex flex-col gap-2">
+                        <button 
+                          onClick={handleDatabaseSend}
+                          className="w-full py-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg bg-gradient-to-r from-indigo-600 via-primary to-[#9c1d42] hover:shadow-primary/20 text-white transform hover:-translate-y-0.5 active:translate-y-0"
+                        >
+                          <Database className="w-3.5 h-3.5" /> Enviar a la Base de Datos
+                        </button>
+                        
+                        <div className="h-[1px] bg-slate-200 dark:bg-slate-700 my-1" />
+                        
+                        <button 
+                          onClick={exportOriginal}
+                          className="w-full py-3 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/20"
+                        >
+                          <Download className="w-3 h-3" /> Exportar Original Depurado
+                        </button>
+                        <button 
+                          onClick={exportDevMode}
+                          className="w-full py-3 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-gradient-to-r from-primary to-[#9c1d42] hover:shadow-primary/20 text-white"
+                        >
+                          <Download className="w-3 h-3" /> Exportar Plantilla Dev Mode
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <button 
+                          disabled={true}
+                          className="w-full py-3 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-500 cursor-not-allowed"
+                        >
+                          <Download className="w-3 h-3" /> Exportar Archivo Final
+                        </button>
+                        <p className="text-[9px] text-center text-slate-400 dark:text-slate-500 italic">
+                          * Debes corregir todos los errores para habilitar la exportación.
+                        </p>
+                      </>
                     )}
                  </div>
                </div>
@@ -710,19 +1082,43 @@ function App() {
                 </div>
               </div>
               
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
                 {allRecords.length > 0 && (
-                  <button
-                    onClick={() => exportToCSV()}
-                    disabled={kpis.fueraPoligono > 0 || kpis.errorPosicionamiento > 0 || kpis.foliosInvalidos > 0}
-                    className={`px-6 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg
-                      ${(kpis.fueraPoligono > 0 || kpis.errorPosicionamiento > 0 || kpis.foliosInvalidos > 0)
-                        ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
-                        : 'bg-primary text-white hover:shadow-primary/20 hover:-translate-y-0.5 active:translate-y-0 shadow-primary/20'
-                      }`}
-                  >
-                    <Download className="w-4 h-4" /> Exportar Depurado
-                  </button>
+                  <>
+                    <button
+                      onClick={handleDatabaseSend}
+                      disabled={errorRecords.length > 0}
+                      className={`px-4 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg
+                        ${errorRecords.length > 0
+                          ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
+                          : 'bg-gradient-to-r from-indigo-600 to-primary text-white hover:shadow-indigo-500/20 hover:-translate-y-0.5 active:translate-y-0'
+                        }`}
+                    >
+                      <Database className="w-4 h-4" /> Enviar a la BD
+                    </button>
+                    <button
+                      onClick={exportOriginal}
+                      disabled={errorRecords.length > 0}
+                      className={`px-4 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 transition-all border
+                        ${errorRecords.length > 0
+                          ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                        }`}
+                    >
+                      <Download className="w-4 h-4" /> Original
+                    </button>
+                    <button
+                      onClick={exportDevMode}
+                      disabled={errorRecords.length > 0}
+                      className={`px-4 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 transition-all border
+                        ${errorRecords.length > 0
+                          ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                        }`}
+                    >
+                      <Download className="w-4 h-4" /> Dev Mode
+                    </button>
+                  </>
                 )}
               </div>
             </div>
@@ -768,58 +1164,179 @@ function App() {
               </>
             ) : (
               <>
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-500 dark:text-slate-400">
-                    Registros con Errores Detectados
-                  </h3>
-                  <span className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 text-[10px] font-black px-2 py-1 rounded">
-                    {errorRecords.length} Incidencias
-                  </span>
+                {/* Tabs de Navegación Premium */}
+                <div className="flex border-b border-slate-200 dark:border-slate-700 mb-6 gap-2">
+                  <button
+                    onClick={() => setActiveTab('errors')}
+                    className={`pb-3 px-4 text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 border-b-2
+                      ${activeTab === 'errors' 
+                        ? 'border-primary text-primary' 
+                        : 'border-transparent text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                  >
+                    <span>Cuarentena</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-black 
+                      ${activeTab === 'errors' 
+                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-400' 
+                        : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400'}`}
+                    >
+                      {errorRecords.length}
+                    </span>
+                  </button>
+                  
+                  <button
+                    onClick={() => setActiveTab('correct')}
+                    className={`pb-3 px-4 text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 border-b-2
+                      ${activeTab === 'correct' 
+                        ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400' 
+                        : 'border-transparent text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300'}`}
+                  >
+                    <span>Aprobados</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-black 
+                      ${activeTab === 'correct' 
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-400' 
+                        : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400'}`}
+                    >
+                      {correctRecords.length}
+                    </span>
+                  </button>
                 </div>
-                
-                <div className="overflow-auto flex-grow custom-scrollbar">
-                  <table className="w-full text-left text-sm">
-                    <thead className="sticky top-0 bg-white dark:bg-slate-800 z-10">
-                      <tr className="border-b border-slate-200 dark:border-slate-700">
-                        <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Contrato</th>
-                        <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Folio</th>
-                        <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Tipo de Error</th>
-                        <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 text-center">Acción</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-700/50">
-                      {errorRecords.length > 0 ? (
-                        errorRecords.map((row) => (
-                          <tr key={row.id} className="hover:bg-red-50/50 dark:hover:bg-red-900/10 transition-colors">
-                            <td className="py-2.5 px-2 text-xs font-medium text-slate-600 dark:text-slate-400">{row['No. Contrato'] || '---'}</td>
-                            <td className="py-2.5 px-2 text-xs font-bold text-slate-800 dark:text-slate-200">{row['folio'] || '---'}</td>
-                            <td className="py-2.5 px-2 text-[10px] text-red-600 dark:text-red-400 font-medium">{row._error}</td>
-                            <td className="py-2.5 px-2 text-center">
-                              <button 
-                                onClick={() => { setSelectedRecord(row); setIsModalOpen(true); }}
-                                className="p-2 bg-slate-100 dark:bg-slate-700 hover:bg-primary hover:text-white dark:hover:bg-primary transition-all rounded-lg group"
-                              >
-                                <Eye className="w-4 h-4 text-slate-500 group-hover:text-white" />
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan="4" className="py-20 text-center">
-                            <div className="flex flex-col items-center gap-3">
-                              <div className="p-4 bg-emerald-100 dark:bg-emerald-900/30 rounded-full">
-                                <CheckCircle className="w-8 h-8 text-emerald-600" />
-                              </div>
-                              <p className="text-sm font-bold text-slate-600 dark:text-slate-300">¡Todos los registros están correctos!</p>
-                              <p className="text-xs text-slate-400">Ya puedes exportar el archivo final.</p>
-                            </div>
-                          </td>
-                        </tr>
+
+                {activeTab === 'errors' ? (
+                  <>
+                    <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                      <div className="flex items-center gap-3">
+                        <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-500 dark:text-slate-400">
+                          Registros con Errores Detectados
+                        </h3>
+                        <span className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 text-[10px] font-black px-2 py-1 rounded">
+                          {errorRecords.length} Incidencias
+                        </span>
+                      </div>
+
+                      {allRecords.some(r => r._error && r._error.includes("Caza de Fantasmas")) && (
+                        <button
+                          onClick={handlePurgeGhosts}
+                          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-black text-[9px] uppercase tracking-widest flex items-center gap-2 transition-all shadow-md hover:shadow-red-600/20 hover:-translate-y-0.5 active:translate-y-0"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Purgar Fantasmas
+                        </button>
                       )}
-                    </tbody>
-                  </table>
-                </div>
+                    </div>
+                    
+                    <div className="overflow-auto flex-grow custom-scrollbar">
+                      <table className="w-full text-left text-sm">
+                        <thead className="sticky top-0 bg-white dark:bg-slate-800 z-10">
+                          <tr className="border-b border-slate-200 dark:border-slate-700">
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Contrato</th>
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Folio</th>
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Tipo de Error</th>
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 text-center">Acción</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-700/50">
+                          {errorRecords.length > 0 ? (
+                            errorRecords.map((row) => (
+                              <tr key={row.id} className="hover:bg-red-50/50 dark:hover:bg-red-900/10 transition-colors">
+                                <td className="py-2.5 px-2 text-xs font-medium text-slate-600 dark:text-slate-400">{row['No. Contrato'] || '---'}</td>
+                                <td className="py-2.5 px-2 text-xs font-bold text-slate-800 dark:text-slate-200">{row['folio'] || '---'}</td>
+                                <td className="py-2.5 px-2 text-[10px] text-red-600 dark:text-red-400 font-medium">{row._error}</td>
+                                <td className="py-2.5 px-2">
+                                  <div className="flex items-center justify-center gap-2">
+                                    <button 
+                                      onClick={() => { setSelectedRecord(row); setIsModalOpen(true); }}
+                                      className="p-2 bg-slate-100 dark:bg-slate-700 hover:bg-primary hover:text-white dark:hover:bg-primary transition-all rounded-lg group"
+                                      title="Ver / Editar"
+                                    >
+                                      <Eye className="w-4 h-4 text-slate-500 group-hover:text-white" />
+                                    </button>
+                                    <button 
+                                      onClick={() => handleDeleteRecord(row.id)}
+                                      className="p-2 bg-slate-100 dark:bg-slate-700 hover:bg-red-500 hover:text-white dark:hover:bg-red-500 transition-all rounded-lg group"
+                                      title="Eliminar Registro"
+                                    >
+                                      <Trash2 className="w-4 h-4 text-slate-500 group-hover:text-white" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan="4" className="py-20 text-center">
+                                <div className="flex flex-col items-center gap-3">
+                                  <div className="p-4 bg-emerald-100 dark:bg-emerald-900/30 rounded-full">
+                                    <CheckCircle className="w-8 h-8 text-emerald-600" />
+                                  </div>
+                                  <p className="text-sm font-bold text-slate-600 dark:text-slate-300">¡Todos los registros están correctos!</p>
+                                  <p className="text-xs text-slate-400">Ya puedes exportar el archivo final.</p>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                      <div className="flex items-center gap-3">
+                        <h3 className="text-[10px] uppercase tracking-wider font-bold text-slate-500 dark:text-slate-400">
+                          Registros Aprobados Correctamente
+                        </h3>
+                        <span className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 text-[10px] font-black px-2 py-1 rounded">
+                          {correctRecords.length} Aprobados
+                        </span>
+                      </div>
+                    </div>
+                    
+                    <div className="overflow-auto flex-grow custom-scrollbar">
+                      <table className="w-full text-left text-sm">
+                        <thead className="sticky top-0 bg-white dark:bg-slate-800 z-10">
+                          <tr className="border-b border-slate-200 dark:border-slate-700">
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Contrato</th>
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Folio</th>
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Colonia</th>
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">Delegación</th>
+                            <th className="py-3 px-2 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 text-center">Inspeccionar</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 dark:divide-slate-700/50">
+                          {correctRecords.length > 0 ? (
+                            correctRecords.map((row) => (
+                              <tr key={row.id} className="hover:bg-emerald-50/50 dark:hover:bg-emerald-900/10 transition-colors">
+                                <td className="py-2.5 px-2 text-xs font-medium text-slate-600 dark:text-slate-400">{row['No. Contrato'] || '---'}</td>
+                                <td className="py-2.5 px-2 text-xs font-bold text-slate-800 dark:text-slate-200">{row['folio'] || '---'}</td>
+                                <td className="py-2.5 px-2 text-xs text-slate-600 dark:text-slate-400 truncate max-w-[150px]" title={row['colonia']}>{row['colonia'] || '---'}</td>
+                                <td className="py-2.5 px-2 text-xs text-slate-600 dark:text-slate-400 truncate max-w-[150px]" title={row['delegacion']}>{row['delegacion'] || '---'}</td>
+                                <td className="py-2.5 px-2">
+                                  <div className="flex items-center justify-center">
+                                    <button 
+                                      onClick={() => { setSelectedRecord(row); setIsModalOpen(true); }}
+                                      className="p-2 bg-slate-100 dark:bg-slate-700 hover:bg-emerald-600 hover:text-white dark:hover:bg-emerald-600 transition-all rounded-lg group"
+                                      title="Ver / Inspeccionar"
+                                    >
+                                      <Eye className="w-4 h-4 text-slate-500 group-hover:text-white" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan="5" className="py-20 text-center">
+                                <div className="flex flex-col items-center gap-3">
+                                  <p className="text-sm font-bold text-slate-600 dark:text-slate-300">No hay registros aprobados aún.</p>
+                                  <p className="text-xs text-slate-400">Corrige incidencias para moverlas a aprobados.</p>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
               </>
             )}
           </div>
@@ -835,6 +1352,93 @@ function App() {
           contractMap={contractMap}
           onSave={handleSaveRecord}
         />
+
+        {/* Conflict Resolver Modal */}
+        <ConflictResolverModal
+          isOpen={showConflictResolver}
+          onClose={() => { setShowConflictResolver(false); setConflictData([]); }}
+          conflicts={conflictData}
+          dominantContract={dominantContract}
+          onResolve={handleResolveConflicts}
+        />
+
+        {/* Pantalla de Progreso (Loader de Ingesta Centralizada) */}
+        {uploading && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-md animate-fade-in">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 max-w-md w-full shadow-2xl text-center flex flex-col items-center">
+              <div className="relative mb-6">
+                <div className="w-24 h-24 rounded-full border-4 border-slate-100 dark:border-slate-800 flex items-center justify-center relative">
+                  <Loader2 className="w-10 h-10 text-primary animate-spin absolute" />
+                  <CloudLightning className="w-5 h-5 text-indigo-500 absolute" />
+                </div>
+              </div>
+
+              <h3 className="text-sm font-black tracking-widest text-slate-800 dark:text-white uppercase mb-2">Transmitiendo Información</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-semibold mb-6 uppercase tracking-wider">{uploadStep}</p>
+
+              <div className="w-full bg-slate-100 dark:bg-slate-800 h-2.5 rounded-full overflow-hidden mb-2">
+                <div 
+                  className="bg-gradient-to-r from-indigo-500 via-primary to-[#9c1d42] h-full transition-all duration-300 rounded-full"
+                  style={{ width: `${uploadProgress}%` }}
+                />
+              </div>
+              <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">
+                Progreso: {uploadProgress}%
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Modal de Éxito de Carga */}
+        {uploadSuccessInfo && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-md animate-fade-in">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 max-w-lg w-full shadow-2xl text-center relative overflow-hidden flex flex-col items-center">
+              <div className="absolute top-0 inset-x-0 h-2 bg-gradient-to-r from-emerald-400 via-teal-500 to-indigo-500" />
+              
+              <div className="w-16 h-16 bg-emerald-100 dark:bg-emerald-950/40 border border-emerald-200/50 dark:border-emerald-900/50 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center mb-6">
+                <CheckCircle className="w-8 h-8" />
+              </div>
+
+              <h3 className="text-lg font-black tracking-tight text-slate-800 dark:text-white uppercase mb-2">¡Sincronización Exitosa!</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-medium mb-6">
+                La información depurada ha sido inyectada directamente en el Sheets oficial sin violar reglas de consistencia.
+              </p>
+
+              <div className="grid grid-cols-3 gap-3 w-full mb-6">
+                <div className="p-3 bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl">
+                  <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-1">Nuevos (Appends)</span>
+                  <span className="text-xl font-black text-slate-700 dark:text-slate-200">{uploadSuccessInfo.appendsCount}</span>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl">
+                  <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider mb-1">Actualizados</span>
+                  <span className="text-xl font-black text-rose-500">{uploadSuccessInfo.overwritesCount}</span>
+                </div>
+                <div className="p-3 bg-primary/5 dark:bg-primary/10 border border-primary/10 rounded-2xl">
+                  <span className="block text-[9px] text-primary/70 dark:text-slate-400 uppercase font-bold tracking-wider mb-1">Total Lote</span>
+                  <span className="text-xl font-black text-primary dark:text-slate-200">{uploadSuccessInfo.total}</span>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 w-full">
+                <a
+                  href="https://docs.google.com/spreadsheets/d/1u-JWLmWk_3YP1Hu3O407j_XJq7p8Rq-MEihzBQjd-IU/edit?gid=1982805141#gid=1982805141"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-grow py-3 px-4 rounded-xl text-xs font-black uppercase tracking-widest text-white bg-gradient-to-r from-emerald-500 to-teal-600 hover:shadow-lg hover:shadow-emerald-500/20 hover:-translate-y-0.5 active:translate-y-0 transition-all flex items-center justify-center gap-2"
+                >
+                  <span>Abrir Google Sheets</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+                <button
+                  onClick={() => setUploadSuccessInfo(null)}
+                  className="flex-grow py-3 px-4 rounded-xl text-xs font-black uppercase tracking-widest text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700/80 transition-colors"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );
