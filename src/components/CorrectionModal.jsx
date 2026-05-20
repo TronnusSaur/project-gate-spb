@@ -122,14 +122,20 @@ const CorrectionModal = ({ isOpen, onClose, record, geoJsonData, contractMap, on
     // Normalizar automáticamente ciertos campos
     const fieldsToNormalize = ['delegacion', 'colonia', 'calle'];
     let finalValue = value;
-    if (fieldsToNormalize.includes(field)) {
+    if (fieldsToNormalize.includes(field.toLowerCase())) {
       finalValue = normalizeText(value);
     }
     
-    setEditedRecord(prev => ({
-      ...prev,
-      [field]: finalValue
-    }));
+    setEditedRecord(prev => {
+      const updated = { ...prev };
+      const targetLower = field.toLowerCase();
+      Object.keys(updated).forEach(k => {
+        if (k.toLowerCase() === targetLower) {
+          updated[k] = finalValue;
+        }
+      });
+      return updated;
+    });
   };
 
   const handleSubmit = (e) => {
@@ -270,23 +276,34 @@ const CorrectionModal = ({ isOpen, onClose, record, geoJsonData, contractMap, on
               </div>
               
               <div className="grid grid-cols-2 gap-3">
-                {Object.keys(editedRecord)
-                  .filter(key => !fieldsToExclude.includes(key))
-                  .map(key => (
-                    <div key={key} className="flex flex-col gap-1 p-3 bg-white dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700/50 rounded-2xl group transition-all hover:shadow-md hover:border-primary/30">
-                      <label className="text-[9px] font-black uppercase tracking-widest text-slate-400 group-focus-within:text-primary transition-colors">
-                        {key}
-                      </label>
-                      <input 
-                        type="text"
-                        value={editedRecord[key] || ''}
-                        onChange={(e) => handleInputChange(key, e.target.value)}
-                        className="w-full bg-transparent text-xs font-bold text-slate-700 dark:text-slate-200 outline-none placeholder:opacity-30"
-                        placeholder={`...`}
-                      />
-                    </div>
-                  ))
-                }
+                {(() => {
+                  const renderedKeys = new Set();
+                  const excludeSet = new Set(fieldsToExclude.map(f => f.toLowerCase()));
+                  
+                  return Object.keys(editedRecord)
+                    .filter(key => {
+                      const lowerKey = key.toLowerCase();
+                      if (excludeSet.has(lowerKey) || renderedKeys.has(lowerKey)) {
+                        return false;
+                      }
+                      renderedKeys.add(lowerKey);
+                      return true;
+                    })
+                    .map(key => (
+                      <div key={key} className="flex flex-col gap-1 p-3 bg-white dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700/50 rounded-2xl group transition-all hover:shadow-md hover:border-primary/30">
+                        <label className="text-[9px] font-black uppercase tracking-widest text-slate-400 group-focus-within:text-primary transition-colors">
+                          {key}
+                        </label>
+                        <input 
+                          type="text"
+                          value={editedRecord[key] || ''}
+                          onChange={(e) => handleInputChange(key, e.target.value)}
+                          className="w-full bg-transparent text-xs font-bold text-slate-700 dark:text-slate-200 outline-none placeholder:opacity-30"
+                          placeholder={`...`}
+                        />
+                      </div>
+                    ));
+                })()}
               </div>
             </div>
             
