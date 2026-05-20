@@ -16,6 +16,30 @@ const normalizeText = (text) => {
     .trim();
 };
 
+const getStandardKeyForHeader = (header) => {
+  if (!header) return "";
+  const clean = header.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, '').replace(/[^a-z0-9]/g, '');
+  
+  if (clean.includes('contrato')) return 'No. Contrato';
+  if (clean.includes('empresa')) return 'Empresa';
+  if (clean.includes('folio')) return 'folio';
+  if (clean.includes('fecharealizado') || clean.includes('fecha')) return 'fechaRealizado';
+  if (clean.includes('calle') && !clean.includes('entre')) return 'calle';
+  if (clean.includes('colonia')) return 'colonia';
+  if (clean.includes('delegacion')) return 'delegacion';
+  if (clean.includes('geolocalizacion') || clean.includes('gps') || clean.includes('coordenada')) return 'GEOLOCALIZACION';
+  if (clean.includes('tipo')) return 'Tipo';
+  if (clean.includes('largo')) return 'largo';
+  if (clean.includes('ancho')) return 'ancho';
+  if (clean.includes('profundidad')) return 'profundidad';
+  if (clean.includes('m2total') || clean.includes('metroscuadrados') || clean.includes('area')) return 'm2total';
+  if (clean.includes('solicitudatendida')) return 'Solicitud Atendida';
+  if (clean.includes('entrecalle1') || clean.includes('calle1')) return 'Entre Calle 1';
+  if (clean.includes('calle2')) return 'Calle 2';
+  
+  return header.trim();
+};
+
 function App() {
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -200,12 +224,18 @@ function App() {
   const exportOriginal = () => {
     if (!allRecords || allRecords.length === 0) return;
     const filename = getExportFilename(false);
+    
+    // Reconstruct each row using the original headers to preserve their exact case/casing
     const cleanedData = allRecords.map(r => {
-      const copy = { ...r };
-      delete copy.id;
-      delete copy._error;
-      return copy;
+      const exportedRow = {};
+      headers.forEach(header => {
+        const trimmedHeader = header.trim();
+        const stdKey = getStandardKeyForHeader(trimmedHeader);
+        exportedRow[trimmedHeader] = r[stdKey] !== undefined ? r[stdKey] : '';
+      });
+      return exportedRow;
     });
+    
     exportToCSV(cleanedData, filename);
   };
 
@@ -217,10 +247,12 @@ function App() {
   };
 
   const mapRowToDevMode = (r) => {
-    const tipoDocVal = r['Solicitud Atendida'] || r['solicitud atendida'] || r['Solicitud atendida'] || r['SOLICITUD ATENDIDA'] || '';
+    if (!r) return {};
+    const tipoDocVal = r['Solicitud Atendida'] || '';
     let lat = '', lon = '';
-    if (r['GEOLOCALIZACION'] && r['GEOLOCALIZACION'].includes(',')) {
-      const parts = r['GEOLOCALIZACION'].split(',').map(s => s.trim());
+    const geo = r['GEOLOCALIZACION'] || '';
+    if (geo && geo.includes(',')) {
+      const parts = geo.split(',').map(s => s.trim());
       if (parts.length === 2) {
         lat = parts[0];
         lon = parts[1];
@@ -236,20 +268,20 @@ function App() {
       folioRef: r['folio'] || '',
       idBacheo: '',
       idDelegacion: '',
-      fecha: r['fechaRealizado'] || r['fecha'] || '',
+      fecha: r['fechaRealizado'] || '',
       estatus: 'T',
       folio: r['folio'] || '',
       latitude: lat,
       longitude: lon,
-      GEOLOCALIZACION: r['GEOLOCALIZACION'] || '',
-      calle: r['calle'] || r['CALLE'] || '',
-      delegacion: r['delegacion'] || r['DELEGACION'] || '',
-      colonia: r['colonia'] || r['COLONIA'] || '',
-      tipo: r['Tipo'] || r['tipo'] || '',
-      largo: r['largo'] || r['LARGO'] || '',
-      ancho: r['ancho'] || r['ANCHO'] || '',
-      profundidad: r['profundidad'] || r['PROFUNDIDAD'] || '',
-      m2total: r['m2total'] || r['M2TOTAL'] || ''
+      GEOLOCALIZACION: geo,
+      calle: r['calle'] || '',
+      delegacion: r['delegacion'] || '',
+      colonia: r['colonia'] || '',
+      tipo: r['Tipo'] || '',
+      largo: r['largo'] || '',
+      ancho: r['ancho'] || '',
+      profundidad: r['profundidad'] || '',
+      m2total: r['m2total'] || ''
     };
   };
 
@@ -713,7 +745,7 @@ function App() {
         
         // Encontrar contrato dominante
         let detectedDominant = null;
-        const contractHeaderIdx = fileHeaders.findIndex(h => h && h.trim() === 'No. Contrato');
+        const contractHeaderIdx = fileHeaders.findIndex(h => h && getStandardKeyForHeader(h) === 'No. Contrato');
         if (contractHeaderIdx !== -1) {
           const counts = {};
           rows.forEach(rowArr => {
@@ -740,7 +772,7 @@ function App() {
 
         // Encontrar empresa dominante
         let detectedEmpresa = "";
-        const empresaHeaderIdx = fileHeaders.findIndex(h => h && normalizeText(h) === 'EMPRESA');
+        const empresaHeaderIdx = fileHeaders.findIndex(h => h && getStandardKeyForHeader(h) === 'Empresa');
         if (empresaHeaderIdx !== -1) {
           const counts = {};
           rows.forEach(rowArr => {
@@ -768,7 +800,10 @@ function App() {
         const processed = rows.map((rowArr, idx) => {
           let row = { id: idx };
           fileHeaders.forEach((h, i) => {
-            if (h) row[h.trim()] = rowArr[i];
+            if (h) {
+              const stdKey = getStandardKeyForHeader(h);
+              row[stdKey] = rowArr[i];
+            }
           });
           
           const rowStr = rowArr.join("").trim();
