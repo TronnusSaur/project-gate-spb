@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Database, FileText, CheckCircle, ArrowRight, AlertCircle, Edit3, X, HelpCircle, MapPin, Calendar, Ruler } from 'lucide-react';
 
 const ConflictResolverModal = ({
@@ -12,13 +12,23 @@ const ConflictResolverModal = ({
   const [editFolios, setEditFolios] = useState({}); // mapping: folio -> input string
   const [errors, setErrors] = useState({}); // mapping: folio -> string error
 
+  const uniqueConflicts = useMemo(() => {
+    if (!conflicts) return [];
+    const seen = new Set();
+    return conflicts.filter(c => {
+      if (seen.has(c.folio)) return false;
+      seen.add(c.folio);
+      return true;
+    });
+  }, [conflicts]);
+
   useEffect(() => {
-    if (isOpen && conflicts) {
+    if (isOpen && uniqueConflicts) {
       const initialResolutions = {};
       const initialEdits = {};
       const initialErrors = {};
 
-      conflicts.forEach(c => {
+      uniqueConflicts.forEach(c => {
         initialResolutions[c.folio] = { type: 'overwrite' }; // Default to overwrite
         initialEdits[c.folio] = c.folio;
         initialErrors[c.folio] = '';
@@ -28,9 +38,9 @@ const ConflictResolverModal = ({
       setEditFolios(initialEdits);
       setErrors(initialErrors);
     }
-  }, [isOpen, conflicts]);
+  }, [isOpen, uniqueConflicts]);
 
-  if (!isOpen || !conflicts || conflicts.length === 0) return null;
+  if (!isOpen || !uniqueConflicts || uniqueConflicts.length === 0) return null;
 
   const handleSelectOption = (folio, type) => {
     setResolutions(prev => ({
@@ -76,7 +86,7 @@ const ConflictResolverModal = ({
     const appends = [];
     const overwrites = [];
 
-    conflicts.forEach(c => {
+    uniqueConflicts.forEach(c => {
       const res = resolutions[c.folio];
       if (res.type === 'overwrite') {
         overwrites.push({
@@ -94,7 +104,7 @@ const ConflictResolverModal = ({
     onResolve(appends, overwrites);
   };
 
-  const totalConflicts = conflicts.length;
+  const totalConflicts = uniqueConflicts.length;
   const resolvedCount = Object.values(resolutions).filter(r => r.type === 'keep' || r.type === 'overwrite' || r.type === 'rename').length;
   const allResolved = resolvedCount === totalConflicts && Object.values(errors).every(e => !e);
 
@@ -133,7 +143,7 @@ const ConflictResolverModal = ({
 
         {/* Content list */}
         <div className="flex-grow overflow-y-auto p-6 md:p-8 space-y-8 custom-scrollbar">
-          {conflicts.map((conflict, index) => {
+          {uniqueConflicts.map((conflict, index) => {
             const originalFolio = conflict.folio;
             const res = resolutions[originalFolio] || { type: 'overwrite' };
             const inputVal = editFolios[originalFolio] || '';

@@ -68,13 +68,22 @@ const CorrectionModal = ({ isOpen, onClose, record, geoJsonData, contractMap, on
       // Find zone polygons using contract→delegation name mapping (NOMDEL)
       if (geoJsonData && record['No. Contrato']) {
         const contrato = String(record['No. Contrato']).trim().padStart(2, '0');
-        const expectedDelegacion = contractMap?.[contrato] || normalizeText(record['delegacion'] || '');
+        let allowedDelegaciones = contractMap?.[contrato] || [];
+        if (typeof allowedDelegaciones === 'string') {
+          allowedDelegaciones = [allowedDelegaciones];
+        }
+        if (allowedDelegaciones.length === 0 && record['delegacion']) {
+          allowedDelegaciones = [normalizeText(record['delegacion'])];
+        }
         
-        console.log("🎯 Searching for polygons with NOMDEL:", expectedDelegacion, "(contrato", contrato, ")");
+        // Normalize all
+        allowedDelegaciones = allowedDelegaciones.map(d => normalizeText(d));
+        
+        console.log("🎯 Searching for polygons with NOMDELs:", allowedDelegaciones, "(contrato", contrato, ")");
 
         const matchingFeatures = geoJsonData.features.filter(f => {
           const nomdel = normalizeText(f.properties?.NOMDEL || '');
-          return nomdel === expectedDelegacion;
+          return allowedDelegaciones.includes(nomdel);
         });
         
         console.log("✅ Matching Polygons found:", matchingFeatures.length);
@@ -95,7 +104,7 @@ const CorrectionModal = ({ isOpen, onClose, record, geoJsonData, contractMap, on
             }
           }
         } else {
-          console.warn("⚠️ No matching polygons found for NODEL:", contrato);
+          console.warn("⚠️ No matching polygons found for NOMDELs of contract:", contrato);
           setZonePolygon(null);
         }
       } else {
@@ -103,7 +112,7 @@ const CorrectionModal = ({ isOpen, onClose, record, geoJsonData, contractMap, on
         setZonePolygon(null);
       }
     }
-  }, [record, geoJsonData]);
+  }, [record, geoJsonData, contractMap]);
 
   if (!isOpen || !editedRecord) return null;
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Header from './components/Header';
 import CorrectionModal from './components/CorrectionModal';
 import ConflictResolverModal from './components/ConflictResolverModal';
-import { UploadCloud, FileUp, Database, MapPin, AlertTriangle, Hash, Play, CheckCircle, XCircle, Download, List, Eye, Trash2, Settings, Loader2, Globe, CloudLightning, ExternalLink } from 'lucide-react';
+import { UploadCloud, FileUp, Database, MapPin, AlertTriangle, Hash, Play, CheckCircle, XCircle, Download, List, Eye, Trash2, Settings, Loader2, Globe, CloudLightning, ExternalLink, Key, FileText } from 'lucide-react';
 import Papa from 'papaparse';
 import { point, booleanPointInPolygon, buffer } from '@turf/turf';
 
@@ -47,7 +47,9 @@ function App() {
   const [processing, setProcessing] = useState(false);
   const [geoJsonData, setGeoJsonData] = useState(null);
   const [colonyCatalog, setColonyCatalog] = useState([]);
+  const [baseContractMap, setBaseContractMap] = useState({});
   const [contractMap, setContractMap] = useState({});
+  const [settingsTab, setSettingsTab] = useState('jurisdictions'); // 'database' | 'jurisdictions'
   const [dominantContract, setDominantContract] = useState(null);
   const [dominantEmpresa, setDominantEmpresa] = useState('');
   const [showErrors, setShowErrors] = useState(false);
@@ -66,8 +68,12 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [headers, setHeaders] = useState([]);
   
-  // Estados de Sincronización con Google Sheets (Base de Datos)
-  const [webAppUrl, setWebAppUrl] = useState(() => localStorage.getItem('gate_web_app_url') || '');
+  // Configuración interna de Toluca Capital.
+  // Las claves sensibles y de producción quedan totalmente integradas internamente para evitar que se tenga que configurar de forma externa por operarios.
+  const webAppUrl = "https://script.google.com/macros/s/AKfycbxEl9Dai2K5bmjyHnKKE9-81gjjkNQPNc2_WpZc5jyHhRKHPxQI2cvrx1XJ8TZsmCmTow/exec";
+  const googleClientId = "495027610202-h2eteem4ru03kofuh5upmf55nbggf6pt.apps.googleusercontent.com";
+  const supervisorsSpreadsheetId = "1pn3MyKxq9Kxm_IGFbksCBa5rxlsNyw-DgvwjRDhXCNE";
+
   const [showSettings, setShowSettings] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadStep, setUploadStep] = useState('');
@@ -76,7 +82,338 @@ function App() {
   const [showConflictResolver, setShowConflictResolver] = useState(false);
   const [uploadSuccessInfo, setUploadSuccessInfo] = useState(null);
   
+  // Google OAuth 2.0 y Configuración de Roles
+  const [user, setUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('gate_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+
+  const adminMode = useMemo(() => {
+    return user && user.email === 'juanpablobumblebee@gmail.com';
+  }, [user]);
+  
+  // Bandeja de Aprobaciones (Staging)
+  const [stagingRecords, setStagingRecords] = useState([]);
+  const [loadingStaging, setLoadingStaging] = useState(false);
+  const [selectedStagingFolios, setSelectedStagingFolios] = useState([]);
+  
   const inputRef = useRef(null);
+
+  // handlers y efectos para autenticación de Google, staging y supervisores
+  const loginWithGoogle = () => {
+    if (!googleClientId) {
+      alert("Por favor, configura tu Google Client ID en los Ajustes ⚙️ (pestaña Base de Datos) antes de iniciar sesión.");
+      setShowSettings(true);
+      setSettingsTab('database');
+      return;
+    }
+
+    if (!window.google) {
+      alert("La API de Google Identity Services no se ha cargado. Verifica tu conexión a Internet.");
+      return;
+    }
+
+    try {
+      const tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: googleClientId,
+        scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
+        callback: async (tokenResponse) => {
+          if (tokenResponse && tokenResponse.access_token) {
+            try {
+              const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                headers: {
+                  Authorization: `Bearer ${tokenResponse.access_token}`
+                }
+              });
+              if (!res.ok) throw new Error("Error al obtener perfil");
+              const profile = await res.json();
+              
+              const userData = {
+                name: profile.name,
+                email: profile.email,
+                picture: profile.picture,
+                token: tokenResponse.access_token
+              };
+
+              setUser(userData);
+              localStorage.setItem('gate_user', JSON.stringify(userData));
+            } catch (err) {
+              console.error("Error fetching user profile:", err);
+              alert("Error al obtener la información de perfil de Google.");
+            }
+          }
+        }
+      });
+      tokenClient.requestAccessToken();
+    } catch (err) {
+      console.error("Error initializing Google Login:", err);
+      alert("Error al iniciar Google Login: " + err.message);
+    }
+  };
+
+  const logoutWithGoogle = () => {
+    setUser(null);
+    localStorage.removeItem('gate_user');
+    setStagingRecords([]);
+    setSelectedStagingFolios([]);
+  };
+
+  const fetchStagingRecords = async () => {
+    if (!webAppUrl) return;
+    setLoadingStaging(true);
+    try {
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "get_staging"
+        })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.status === "error") throw new Error(data.message);
+      setStagingRecords(data.records || []);
+      setSelectedStagingFolios([]);
+    } catch (err) {
+      console.error("Error fetching staging records:", err);
+    } finally {
+      setLoadingStaging(false);
+    }
+  };
+
+  const handleApproveStaging = async (foliosToApprove = selectedStagingFolios) => {
+    if (!webAppUrl) return;
+    if (!foliosToApprove || foliosToApprove.length === 0) {
+      alert("No hay folios seleccionados para aprobar.");
+      return;
+    }
+
+    if (!window.confirm(`¿Estás seguro de que deseas aprobar y mover los ${foliosToApprove.length} folios seleccionados a la base de datos central de Toluca Capital?`)) {
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(30);
+    setUploadStep(`Aprobando ${foliosToApprove.length} folios en el servidor...`);
+
+    try {
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "approve_staging",
+          folios: foliosToApprove
+        })
+      });
+
+      if (!response.ok) throw new Error(`Servidor: ${response.status}`);
+      const data = await response.json();
+      if (data.status === "error") throw new Error(data.message);
+
+      setUploadProgress(100);
+      setUploadStep("¡Aprobación completada!");
+      alert(`Se han aprobado y movido ${data.approvedCount} folios con éxito.`);
+      
+      await fetchStagingRecords();
+    } catch (err) {
+      console.error("Error approving staging:", err);
+      alert(`Error al aprobar folios: ${err.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleRejectStaging = async (foliosToReject = selectedStagingFolios) => {
+    if (!webAppUrl) return;
+    if (!foliosToReject || foliosToReject.length === 0) {
+      alert("No hay folios seleccionados para rechazar.");
+      return;
+    }
+
+    if (!window.confirm(`¿Estás seguro de que deseas rechazar y purgar los ${foliosToReject.length} folios seleccionados? Se eliminarán definitivamente del Staging.`)) {
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(30);
+    setUploadStep(`Purgando ${foliosToReject.length} folios de Staging...`);
+
+    try {
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "reject_staging",
+          folios: foliosToReject
+        })
+      });
+
+      if (!response.ok) throw new Error(`Servidor: ${response.status}`);
+      const data = await response.json();
+      if (data.status === "error") throw new Error(data.message);
+
+      setUploadProgress(100);
+      setUploadStep("¡Rechazo y purga completados!");
+      alert(`Se han purgado ${data.rejectedCount} folios con éxito de Staging.`);
+
+      await fetchStagingRecords();
+    } catch (err) {
+      console.error("Error rejecting staging:", err);
+      alert(`Error al rechazar folios: ${err.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleExportStaging = async () => {
+    if (!webAppUrl) {
+      alert("Por favor, configura la URL de la Web App de Google Apps Script primero.");
+      setShowSettings(true);
+      return;
+    }
+
+    if (errorRecords.length > 0) {
+      alert("Debes corregir todos los errores en Cuarentena antes de enviar a la base de datos.");
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(20);
+    setUploadStep("Conectando con Google Sheets Staging...");
+
+    try {
+      const recordsToSend = allRecords.map(r => mapRowToDevMode(r));
+      setUploadProgress(50);
+      setUploadStep("Transmitiendo registros a la pestaña STAGING_MASTER...");
+
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "write_staging",
+          records: recordsToSend
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error de servidor: ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data.status === "error") {
+        throw new Error(data.message || "Error al escribir en Staging.");
+      }
+
+      setUploadProgress(100);
+      setUploadStep("¡Ingesta de Staging completada exitosamente!");
+      setUploadSuccessInfo({
+        appendsCount: recordsToSend.length,
+        overwritesCount: 0,
+        total: recordsToSend.length
+      });
+
+      setFile(null);
+      setAllRecords([]);
+      setResults(null);
+    } catch (error) {
+      console.error("❌ Error de comunicación con Staging:", error);
+      alert(`Error al enviar a Staging: ${error.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleExportSupervisors = async () => {
+    if (!webAppUrl) {
+      alert("Por favor, configura la URL de la Web App de Google Apps Script primero.");
+      setShowSettings(true);
+      return;
+    }
+
+    if (!supervisorsSpreadsheetId) {
+      alert("Por favor, configura el ID del Libro de Supervisores en Ajustes ⚙️.");
+      setShowSettings(true);
+      return;
+    }
+
+    if (errorRecords.length > 0) {
+      alert("Debes corregir todos los errores en Cuarentena antes de enviar a la base de datos.");
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(20);
+    setUploadStep("Conectando con el Libro de Supervisores...");
+
+    try {
+      const recordsToSend = allRecords.map(r => mapRowToDevMode(r));
+      setUploadProgress(50);
+      setUploadStep("Segmentando y transmitiendo registros por número de contrato...");
+
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "write_supervisors",
+          records: recordsToSend,
+          spreadsheetId: supervisorsSpreadsheetId
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error de servidor: ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data.status === "error") {
+        throw new Error(data.message || "Error al escribir en Supervisores.");
+      }
+
+      setUploadProgress(100);
+      setUploadStep("¡Ingesta en Supervisores completada!");
+      
+      const totalWritten = Object.values(data.desgloses || {}).reduce((a, b) => a + b, 0);
+      alert(`¡Sincronización segmentada en Supervisores exitosa! Se han escrito ${totalWritten} registros distribuidos en las hojas por contrato.`);
+      
+      setFile(null);
+      setAllRecords([]);
+      setResults(null);
+    } catch (error) {
+      console.error("❌ Error al exportar a Supervisores:", error);
+      alert(`Error al enviar a Supervisores: ${error.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (adminMode && webAppUrl) {
+      fetchStagingRecords();
+    } else {
+      setStagingRecords([]);
+      setSelectedStagingFolios([]);
+    }
+  }, [adminMode, webAppUrl]);
+
 
   // Derived state for errors
   const errorRecords = useMemo(() => {
@@ -137,22 +474,95 @@ function App() {
           header: true,
           skipEmptyLines: true,
           complete: (results) => {
-            const map = {};
+            const csvMap = {};
             results.data.forEach(item => {
               // "Contrato 47" -> "47"
               const num = String(item['No. Contrato'] || '').replace(/\D/g, '').padStart(2, '0');
-              const delegacion = normalizeText(item['Delegacion'] || '');
-              if (num && delegacion) {
-                map[num] = delegacion;
+              const delegacionesRaw = String(item['Delegacion'] || '').split(/[;,|]/);
+              if (num) {
+                if (!csvMap[num]) csvMap[num] = [];
+                delegacionesRaw.forEach(d => {
+                  const normalizedD = normalizeText(d.trim());
+                  if (normalizedD && !csvMap[num].includes(normalizedD)) {
+                    csvMap[num].push(normalizedD);
+                  }
+                });
               }
             });
-            console.log("✅ Contract map loaded:", map);
-            setContractMap(map);
+            console.log("✅ Base CSV contract map loaded:", csvMap);
+            setBaseContractMap(csvMap);
+
+            let savedOverrides = {};
+            try {
+              savedOverrides = JSON.parse(localStorage.getItem('gate_jurisdiction_overrides') || '{}');
+            } catch (e) {
+              console.error("Error reading overrides from localStorage", e);
+            }
+
+            const mergedMap = { ...csvMap };
+            Object.keys(savedOverrides).forEach(key => {
+              mergedMap[key] = savedOverrides[key];
+            });
+
+            console.log("✅ Contract map loaded and merged:", mergedMap);
+            setContractMap(mergedMap);
           }
         });
       })
       .catch(err => console.error("Error loading contracts", err));
   }, []);
+
+  const availableDelegaciones = useMemo(() => {
+    if (!geoJsonData) return [];
+    const dels = new Set();
+    geoJsonData.features.forEach(f => {
+      const nomdel = f.properties?.NOMDEL;
+      if (nomdel) {
+        dels.add(normalizeText(nomdel));
+      }
+    });
+    return Array.from(dels).sort();
+  }, [geoJsonData]);
+
+  const allContractNumbers = useMemo(() => {
+    const nums = new Set([...Object.keys(baseContractMap), ...Object.keys(contractMap)]);
+    return Array.from(nums).sort();
+  }, [baseContractMap, contractMap]);
+
+  const handleAddDelegation = (contratoNum, delegacion) => {
+    const current = contractMap[contratoNum] || [];
+    const normalizedD = normalizeText(delegacion);
+    if (normalizedD && !current.includes(normalizedD)) {
+      const updated = [...current, normalizedD];
+      const newMap = { ...contractMap, [contratoNum]: updated };
+      setContractMap(newMap);
+      
+      // Persistir en localStorage
+      const savedOverrides = JSON.parse(localStorage.getItem('gate_jurisdiction_overrides') || '{}');
+      savedOverrides[contratoNum] = updated;
+      localStorage.setItem('gate_jurisdiction_overrides', JSON.stringify(savedOverrides));
+    }
+  };
+
+  const handleRemoveDelegation = (contratoNum, delegacion) => {
+    const current = contractMap[contratoNum] || [];
+    const normalizedD = normalizeText(delegacion);
+    const updated = current.filter(d => normalizeText(d) !== normalizedD);
+    const newMap = { ...contractMap, [contratoNum]: updated };
+    setContractMap(newMap);
+    
+    // Persistir en localStorage
+    const savedOverrides = JSON.parse(localStorage.getItem('gate_jurisdiction_overrides') || '{}');
+    savedOverrides[contratoNum] = updated;
+    localStorage.setItem('gate_jurisdiction_overrides', JSON.stringify(savedOverrides));
+  };
+
+  const handleResetJurisdictions = () => {
+    if (window.confirm("¿Estás seguro de que deseas restablecer todas las jurisdicciones a sus valores originales de CSV?")) {
+      localStorage.removeItem('gate_jurisdiction_overrides');
+      setContractMap({ ...baseContractMap });
+    }
+  };
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
 
@@ -602,17 +1012,21 @@ function App() {
               const contratoNum = String(updatedRow['No. Contrato']).trim().padStart(2, '0');
 
               // Obtener nombre de delegación oficial desde el mapeo de contratos
-              const expectedDelegacion = contractMap[contratoNum] || '';
+              let allowedDelegaciones = contractMap[contratoNum] || [];
+              if (typeof allowedDelegaciones === 'string') {
+                allowedDelegaciones = [allowedDelegaciones];
+              }
+              allowedDelegaciones = allowedDelegaciones.map(d => normalizeText(d));
 
-              // PASO 1: Buscar polígonos de la DELEGACIÓN del contrato (por NOMDEL, NO por NODEL)
-              const contractFeatures = expectedDelegacion
+              // PASO 1: Buscar polígonos de las DELEGACIONES del contrato (por NOMDEL, NO por NODEL)
+              const contractFeatures = allowedDelegaciones.length > 0
                 ? geoData.features.filter(f => {
                     const nomdel = normalizeText(f.properties?.NOMDEL || '');
-                    return nomdel === expectedDelegacion;
+                    return allowedDelegaciones.includes(nomdel);
                   })
                 : [];
 
-              console.log(`📍 Contrato ${contratoNum} → Delegación esperada: ${expectedDelegacion}, polígonos encontrados: ${contractFeatures.length}`);
+              console.log(`📍 Contrato ${contratoNum} → Delegaciones esperadas: ${allowedDelegaciones.join(", ")}, polígonos encontrados: ${contractFeatures.length}`);
 
               // 1a. Verificar si cae exactamente dentro de un polígono de la delegación
               let matchedFeature = contractFeatures.find(f => {
@@ -654,7 +1068,8 @@ function App() {
                   if (nomdel) updatedRow['delegacion'] = normalizeText(nomdel);
 
                   // Reportar que cayó en otra delegación
-                  errors.push(`GPS: Punto cae en delegación ${normalizeText(nomdel)}, no en ${expectedDelegacion || 'contrato ' + contratoNum}`);
+                  const allowedListStr = allowedDelegaciones.join(", ");
+                  errors.push(`GPS: Punto cae en delegación ${normalizeText(nomdel)}, no en las permitidas para el contrato ${contratoNum} (${allowedListStr || 'ninguna'})`);
                   isRed = true;
                 }
               }
@@ -855,9 +1270,15 @@ function App() {
 
   return (
     <div className="min-h-screen bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-50 transition-colors duration-300 font-sans">
-      <Header toggleDarkMode={toggleDarkMode} />
+      <Header 
+        toggleDarkMode={toggleDarkMode}
+        user={user}
+        onLogin={loginWithGoogle}
+        onLogout={logoutWithGoogle}
+        adminMode={adminMode}
+      />
       
-      <main className="w-full max-w-[1536px] mx-auto px-4 lg:px-8 py-8 h-[calc(100vh-80px)] flex flex-col overflow-hidden">
+      <main className="w-full max-w-[1536px] mx-auto px-4 lg:px-8 py-8 min-h-[calc(100vh-80px)] flex flex-col">
         
         {/* Page Title Section */}
         <div className="mb-8 animate-fade-in">
@@ -924,15 +1345,192 @@ function App() {
           </div>
         </div>
 
+        {/* Bandeja de Aprobación de Staging (Exclusivo para Administrador) */}
+        {adminMode && (
+          <div className="mb-8 p-6 bg-white/40 dark:bg-slate-900/40 backdrop-blur-md border border-amber-500/25 dark:border-amber-500/10 rounded-3xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.15)] animate-fade-in flex flex-col gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-amber-500/10 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-500/10 text-amber-500 rounded-xl">
+                  <Database className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-black text-sm text-slate-800 dark:text-slate-100 uppercase tracking-widest flex items-center gap-2">
+                    Bandeja de Aprobación de Staging
+                    <span className="bg-amber-500 text-white text-[8px] font-black uppercase px-2 py-0.5 rounded tracking-widest animate-pulse">
+                      ADMIN
+                    </span>
+                  </h3>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-widest mt-0.5">
+                    Control de Ingesta Intermedia STAGING_MASTER
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={fetchStagingRecords}
+                  disabled={loadingStaging}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                  title="Actualizar bandeja de entrada"
+                >
+                  {loadingStaging ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <span className="material-symbols-outlined text-sm">refresh</span>
+                  )}
+                  <span>Actualizar ({stagingRecords.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleApproveStaging()}
+                  disabled={selectedStagingFolios.length === 0}
+                  className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-md cursor-pointer
+                    ${selectedStagingFolios.length === 0
+                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed shadow-none border-transparent'
+                      : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/10 hover:-translate-y-0.5 active:translate-y-0'
+                    }`}
+                >
+                  <span className="material-symbols-outlined text-sm">done_all</span>
+                  <span>Aprobar ({selectedStagingFolios.length})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleRejectStaging()}
+                  disabled={selectedStagingFolios.length === 0}
+                  className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all border cursor-pointer
+                    ${selectedStagingFolios.length === 0
+                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 border-transparent cursor-not-allowed'
+                      : 'bg-rose-500 hover:bg-rose-600 text-white border-rose-600 hover:shadow-rose-500/10 hover:-translate-y-0.5 active:translate-y-0'
+                    }`}
+                >
+                  <span className="material-symbols-outlined text-sm">delete_sweep</span>
+                  <span>Rechazar ({selectedStagingFolios.length})</span>
+                </button>
+              </div>
+            </div>
+
+            {loadingStaging ? (
+              <div className="py-12 flex flex-col items-center justify-center gap-3 text-slate-400">
+                <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
+                <p className="text-xs font-bold uppercase tracking-wider animate-pulse">Obteniendo base de Staging...</p>
+              </div>
+            ) : stagingRecords.length === 0 ? (
+              <div className="py-12 text-center flex flex-col items-center gap-2">
+                <div className="w-12 h-12 bg-emerald-500/10 text-emerald-500 rounded-full flex items-center justify-center mb-1">
+                  <span className="material-symbols-outlined text-2xl">done</span>
+                </div>
+                <p className="text-sm font-black text-slate-700 dark:text-slate-300">¡Bandeja completamente limpia!</p>
+                <p className="text-xs text-slate-400">No hay registros pendientes de aprobación en STAGING_MASTER.</p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-wider">
+                  <span>Selección: {selectedStagingFolios.length} de {stagingRecords.length} folios</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedStagingFolios.length === stagingRecords.length) {
+                        setSelectedStagingFolios([]);
+                      } else {
+                        setSelectedStagingFolios(stagingRecords.map(r => String(r.folio)));
+                      }
+                    }}
+                    className="text-primary hover:underline text-[9px] cursor-pointer"
+                  >
+                    {selectedStagingFolios.length === stagingRecords.length ? 'Deseleccionar Todos' : 'Seleccionar Todos'}
+                  </button>
+                </div>
+
+                <div className="overflow-x-auto max-h-[350px] custom-scrollbar border border-slate-100 dark:border-slate-800/80 rounded-2xl">
+                  <table className="w-full text-left text-sm">
+                    <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900 text-slate-500 dark:text-slate-400 z-10">
+                      <tr className="border-b border-slate-200 dark:border-slate-800">
+                        <th className="py-2.5 px-3 w-10 text-center">
+                          <input
+                            type="checkbox"
+                            checked={selectedStagingFolios.length === stagingRecords.length && stagingRecords.length > 0}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedStagingFolios(stagingRecords.map(r => String(r.folio)));
+                              } else {
+                                setSelectedStagingFolios([]);
+                              }
+                            }}
+                            className="rounded border-slate-300 text-amber-500 focus:ring-amber-500/20 cursor-pointer"
+                          />
+                        </th>
+                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Contrato</th>
+                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Folio</th>
+                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Vía / Calle</th>
+                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Colonia</th>
+                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Delegación</th>
+                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Área m²</th>
+                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Fecha Carga</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800 bg-white/50 dark:bg-slate-900/50">
+                      {stagingRecords.map((r, i) => {
+                        const isChecked = selectedStagingFolios.includes(String(r.folio));
+                        const dateFormatted = r.TIMESTAMP_STAGING ? new Date(r.TIMESTAMP_STAGING).toLocaleString('es-MX', {
+                          day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+                        }) : '---';
+
+                        return (
+                          <tr
+                            key={i}
+                            className={`hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors cursor-pointer ${isChecked ? 'bg-amber-500/5' : ''}`}
+                            onClick={() => {
+                              setSelectedStagingFolios(prev =>
+                                isChecked
+                                  ? prev.filter(f => f !== String(r.folio))
+                                  : [...prev, String(r.folio)]
+                              );
+                            }}
+                          >
+                            <td className="py-2 px-3 text-center" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={(e) => {
+                                  setSelectedStagingFolios(prev =>
+                                    e.target.checked
+                                      ? [...prev, String(r.folio)]
+                                      : prev.filter(f => f !== String(r.folio))
+                                  );
+                                }}
+                                className="rounded border-slate-300 text-amber-500 focus:ring-amber-500/20 cursor-pointer"
+                              />
+                            </td>
+                            <td className="py-2 px-2 text-xs font-semibold text-slate-500">{String(r.ID || '').padStart(2, '0')}</td>
+                            <td className="py-2 px-2 text-xs font-black text-slate-800 dark:text-slate-200">{r.folio}</td>
+                            <td className="py-2 px-2 text-xs text-slate-700 dark:text-slate-300 truncate max-w-[140px] font-sans font-medium" title={r.calle}>{r.calle || '---'}</td>
+                            <td className="py-2 px-2 text-xs text-slate-600 dark:text-slate-400 truncate max-w-[130px]" title={r.colonia}>{r.colonia || '---'}</td>
+                            <td className="py-2 px-2 text-xs text-slate-600 dark:text-slate-400 truncate max-w-[130px]" title={r.delegacion}>{r.delegacion || '---'}</td>
+                            <td className="py-2 px-2 text-xs font-mono font-bold text-slate-600 dark:text-slate-400">{r.m2total ? `${parseFloat(r.m2total).toFixed(2)} m²` : '---'}</td>
+                            <td className="py-2 px-2 text-[10px] text-slate-400 font-medium font-mono">{dateFormatted}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Main Content Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.5fr] gap-8 flex-grow min-h-0 pb-4">
           
           {/* Upload Section */}
           <div className="bg-white/70 dark:bg-slate-800/70 backdrop-blur-md rounded-3xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.1)] border border-white/20 dark:border-slate-700/50 p-8 flex flex-col relative overflow-hidden group">
             {/* Decorative background element */}
-            <div className="absolute -top-24 -right-24 w-48 h-48 bg-primary/5 rounded-full blur-3xl group-hover:bg-primary/10 transition-colors duration-700" />
+            <div className="absolute -top-24 -right-24 w-48 h-48 bg-primary/5 rounded-full blur-3xl group-hover:bg-primary/10 transition-colors duration-700 pointer-events-none" />
             
-            <div className="flex items-center justify-between mb-6">
+            <div className="relative z-10 flex items-center justify-between mb-6">
               <div className="flex items-center gap-3">
                 <div className="p-2.5 bg-slate-100 dark:bg-slate-700 rounded-xl">
                   <UploadCloud className="w-5 h-5 text-primary" />
@@ -952,37 +1550,104 @@ function App() {
               </button>
             </div>
 
-            {/* Panel de Configuración de Google Sheets Premium */}
+            {/* Panel de Configuración de Ajustes (Gestor de Jurisdicciones directo) */}
             {showSettings && (
-              <div className="mb-6 p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800 animate-slide-down">
-                <div className="flex items-center gap-2 mb-2 text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
-                  <Globe className="w-3.5 h-3.5 text-primary" />
-                  <span>Enlace Google Apps Script Web App</span>
-                </div>
-                <p className="text-[10px] text-slate-400 dark:text-slate-500 mb-3">
-                  Pega la URL obtenida al implementar tu Apps Script para la comunicación con Google Sheets.
-                </p>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={webAppUrl}
-                    onChange={(e) => {
-                      const url = e.target.value.trim();
-                      setWebAppUrl(url);
-                      localStorage.setItem('gate_web_app_url', url);
-                    }}
-                    placeholder="https://script.google.com/macros/s/.../exec"
-                    className="flex-grow px-3 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 font-mono focus:outline-none focus:ring-2 focus:ring-primary/20"
-                  />
-                  {webAppUrl ? (
-                    <div className="px-3 py-2 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 rounded-xl border border-emerald-100 dark:border-emerald-900/50 flex items-center justify-center">
-                      <CheckCircle className="w-4 h-4" />
+              <div className="mb-6 p-5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 animate-slide-down shadow-xl backdrop-blur-md">
+                <div className="animate-fade-in flex flex-col gap-4">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <div className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                        <MapPin className="w-3.5 h-3.5 text-primary" />
+                        <span>Gestor de Jurisdicciones de Contratos</span>
+                      </div>
+                      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">
+                        Permite que un contrato trabaje en múltiples delegaciones oficiales para resolver restricciones de volumen.
+                      </p>
                     </div>
-                  ) : (
-                    <div className="px-3 py-2 bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 rounded-xl border border-amber-100 dark:border-amber-900/50 flex items-center justify-center">
-                      <AlertTriangle className="w-4 h-4 animate-pulse" />
-                    </div>
-                  )}
+                    <button
+                      type="button"
+                      onClick={handleResetJurisdictions}
+                      className="text-[10px] font-bold text-rose-500 hover:text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 px-2.5 py-1.5 rounded-lg border border-rose-200/50 dark:border-rose-900/30 transition-all flex items-center gap-1"
+                      title="Restablecer todos los permisos a la configuración original de contracts.csv"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Restablecer CSV</span>
+                    </button>
+                  </div>
+
+                  {/* Lista / Grid de Contratos con scroll */}
+                  <div className="max-h-[300px] overflow-y-auto pr-1 flex flex-col gap-2.5">
+                    {allContractNumbers.map(contratoNum => {
+                      const currentDels = contractMap[contratoNum] || [];
+                      // Filtrar delegaciones no autorizadas
+                      const unselectedDels = availableDelegaciones.filter(
+                        d => !currentDels.includes(d)
+                      );
+
+                      return (
+                        <div 
+                          key={contratoNum} 
+                          className="p-3 bg-white dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:shadow-sm transition-all"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] font-black px-2.5 py-1 bg-gradient-to-r from-primary to-indigo-600 text-white rounded-lg shadow-sm tracking-wider">
+                              CONTRATO {contratoNum}
+                            </span>
+                            <span className="text-[10px] text-slate-400 dark:text-slate-500 font-semibold">
+                              ({currentDels.length} permitidas)
+                            </span>
+                          </div>
+
+                          {/* Tags de Delegaciones Autorizadas */}
+                          <div className="flex flex-wrap items-center gap-1.5 flex-grow sm:justify-end">
+                            {currentDels.map(del => (
+                              <span 
+                                key={del} 
+                                className="inline-flex items-center gap-1 px-2 py-0.5 text-[9px] font-extrabold uppercase bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-md border border-slate-200/30 dark:border-slate-700/50"
+                              >
+                                {del}
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveDelegation(contratoNum, del)}
+                                  className="w-3.5 h-3.5 flex items-center justify-center rounded-full bg-slate-200 dark:bg-slate-700 text-slate-500 hover:bg-rose-500 hover:text-white transition-all text-[8px] ml-1 font-sans"
+                                  title={`Quitar permiso de ${del}`}
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+
+                            {/* Dropdown de Selección Rápida */}
+                            {unselectedDels.length > 0 ? (
+                              <div className="relative inline-block">
+                                <select
+                                  onChange={(e) => {
+                                    if (e.target.value) {
+                                      handleAddDelegation(contratoNum, e.target.value);
+                                      e.target.value = ''; // reset dropdown
+                                    }
+                                  }}
+                                  defaultValue=""
+                                  className="px-2 py-0.5 text-[9px] font-bold bg-primary/5 hover:bg-primary/10 text-primary border border-primary/20 hover:border-primary/30 rounded-md outline-none cursor-pointer transition-all"
+                                >
+                                  <option value="" disabled>+ Autorizar</option>
+                                  {unselectedDels.map(d => (
+                                    <option key={d} value={d}>
+                                      {d}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            ) : (
+                              <span className="text-[9px] text-slate-400 dark:text-slate-500 font-semibold italic">
+                                Todas autorizadas
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             )}
@@ -1063,28 +1728,46 @@ function App() {
                     </div>
                     
                     {errorRecords.length === 0 ? (
-                      <div className="flex flex-col gap-2">
-                        <button 
-                          onClick={handleDatabaseSend}
-                          className="w-full py-3.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg bg-gradient-to-r from-indigo-600 via-primary to-[#9c1d42] hover:shadow-primary/20 text-white transform hover:-translate-y-0.5 active:translate-y-0"
-                        >
-                          <Database className="w-3.5 h-3.5" /> Enviar a la Base de Datos
-                        </button>
-                        
-                        <div className="h-[1px] bg-slate-200 dark:bg-slate-700 my-1" />
-                        
-                        <button 
-                          onClick={exportOriginal}
-                          className="w-full py-3 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/20"
-                        >
-                          <Download className="w-3 h-3" /> Exportar Original Depurado
-                        </button>
-                        <button 
-                          onClick={exportDevMode}
-                          className="w-full py-3 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-gradient-to-r from-primary to-[#9c1d42] hover:shadow-primary/20 text-white"
-                        >
-                          <Download className="w-3 h-3" /> Exportar Plantilla Dev Mode
-                        </button>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+                        {/* COLUMNA ONLINE */}
+                        <div className="flex flex-col gap-2 p-3 bg-slate-100/50 dark:bg-slate-900/40 rounded-2xl border border-slate-200/40 dark:border-slate-800/40">
+                          <div className="flex items-center gap-1.5 px-1 mb-1">
+                            <Globe className="w-3.5 h-3.5 text-primary animate-pulse" />
+                            <span className="text-[10px] font-black text-slate-700 dark:text-slate-300 uppercase tracking-wider">ONLINE (Sheets)</span>
+                          </div>
+                          <button 
+                            onClick={handleExportStaging}
+                            className="w-full py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-gradient-to-r from-primary to-[#9c1d42] hover:shadow-primary/20 text-white transform hover:-translate-y-0.5 active:translate-y-0"
+                          >
+                            <UploadCloud className="w-3.5 h-3.5" /> A Template Sheets
+                          </button>
+                          <button 
+                            onClick={handleExportSupervisors}
+                            className="w-full py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-amber-600 hover:bg-amber-700 hover:shadow-amber-500/20 text-white transform hover:-translate-y-0.5 active:translate-y-0"
+                          >
+                            <Globe className="w-3.5 h-3.5" /> A Supervisores Sheets
+                          </button>
+                        </div>
+
+                        {/* COLUMNA OFFLINE */}
+                        <div className="flex flex-col gap-2 p-3 bg-slate-100/50 dark:bg-slate-900/40 rounded-2xl border border-slate-200/40 dark:border-slate-800/40">
+                          <div className="flex items-center gap-1.5 px-1 mb-1">
+                            <Download className="w-3.5 h-3.5 text-emerald-600" />
+                            <span className="text-[10px] font-black text-slate-700 dark:text-slate-300 uppercase tracking-wider">OFFLINE (Local)</span>
+                          </div>
+                          <button 
+                            onClick={exportOriginal}
+                            className="w-full py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-emerald-600 hover:bg-emerald-700 hover:shadow-emerald-500/20 text-white transform hover:-translate-y-0.5 active:translate-y-0"
+                          >
+                            <Download className="w-3 h-3" /> Original Depurado
+                          </button>
+                          <button 
+                            onClick={exportDevMode}
+                            className="w-full py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-sm bg-slate-700 hover:bg-slate-800 text-white transform hover:-translate-y-0.5 active:translate-y-0"
+                          >
+                            <Download className="w-3 h-3" /> Plantilla Dev Mode
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <>
@@ -1117,41 +1800,54 @@ function App() {
                 </div>
               </div>
               
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
                 {allRecords.length > 0 && (
                   <>
                     <button
-                      onClick={handleDatabaseSend}
+                      onClick={handleExportStaging}
                       disabled={errorRecords.length > 0}
-                      className={`px-4 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 transition-all shadow-lg
+                      className={`px-3 py-2 rounded-xl font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-md
                         ${errorRecords.length > 0
                           ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
-                          : 'bg-gradient-to-r from-indigo-600 to-primary text-white hover:shadow-indigo-500/20 hover:-translate-y-0.5 active:translate-y-0'
+                          : 'bg-gradient-to-r from-primary to-[#9c1d42] text-white hover:shadow-primary/20 hover:-translate-y-0.5 active:translate-y-0'
                         }`}
+                      title="Exportar a Template Sheets (Staging)"
                     >
-                      <Database className="w-4 h-4" /> Enviar a la BD
+                      <UploadCloud className="w-3.5 h-3.5" /> Staging
+                    </button>
+                    <button
+                      onClick={handleExportSupervisors}
+                      disabled={errorRecords.length > 0}
+                      className={`px-3 py-2 rounded-xl font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-md
+                        ${errorRecords.length > 0
+                          ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
+                          : 'bg-amber-600 text-white hover:shadow-amber-500/20 hover:-translate-y-0.5 active:translate-y-0'
+                        }`}
+                      title="Exportar a Supervisores Sheets"
+                    >
+                      <Globe className="w-3.5 h-3.5" /> Supervisores
                     </button>
                     <button
                       onClick={exportOriginal}
                       disabled={errorRecords.length > 0}
-                      className={`px-4 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 transition-all border
+                      className={`px-3 py-2 rounded-xl font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 transition-all border
                         ${errorRecords.length > 0
                           ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
                           : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'
                         }`}
                     >
-                      <Download className="w-4 h-4" /> Original
+                      <Download className="w-3.5 h-3.5" /> Original
                     </button>
                     <button
                       onClick={exportDevMode}
                       disabled={errorRecords.length > 0}
-                      className={`px-4 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center gap-2 transition-all border
+                      className={`px-3 py-2 rounded-xl font-black text-[9px] uppercase tracking-wider flex items-center gap-1.5 transition-all border
                         ${errorRecords.length > 0
                           ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed border border-slate-200 dark:border-slate-700 shadow-none'
                           : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800/50'
                         }`}
                     >
-                      <Download className="w-4 h-4" /> Dev Mode
+                      <Download className="w-3.5 h-3.5" /> Dev Mode
                     </button>
                   </>
                 )}
