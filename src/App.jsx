@@ -449,48 +449,62 @@ function App() {
     }
 
     setUploading(true);
-    setUploadProgress(20);
+    setUploadProgress(0);
     setUploadStep("Conectando con Google Sheets Staging...");
 
     try {
       const recordsToSend = allRecords.map(r => mapRowToDevMode(r));
-      setUploadProgress(50);
-      setUploadStep("Transmitiendo registros a la pestaña STAGING_MASTER...");
+      const totalRecords = recordsToSend.length;
 
       // Generación del ID único del lote (LOTE-[CONTRATO]-[TIMESTAMP])
       const contractId = recordsToSend[0]?.ID || '00';
       const batchId = `LOTE-${contractId}-${Date.now()}`;
       const uploadedBy = firebaseUser?.email || user?.email || "Supervisor Anónimo";
 
-      const response = await fetch(webAppUrl, {
-        method: "POST",
-        mode: "cors",
-        headers: {
-          "Content-Type": "text/plain;charset=utf-8"
-        },
-        body: JSON.stringify({
-          action: "write_staging",
-          records: recordsToSend,
-          batchId: batchId,
-          uploadedBy: uploadedBy
-        })
-      });
+      // Segmentación en bloques de 150 registros
+      const chunkSize = 150;
+      let appendsCount = 0;
 
-      if (!response.ok) {
-        throw new Error(`Error de servidor: ${response.status}`);
-      }
+      for (let i = 0; i < totalRecords; i += chunkSize) {
+        const chunk = recordsToSend.slice(i, i + chunkSize);
+        const chunkStart = i + 1;
+        const chunkEnd = Math.min(i + chunkSize, totalRecords);
+        setUploadStep(`Transmitiendo bloque de registros (${chunkStart} a ${chunkEnd} de ${totalRecords})...`);
 
-      const data = await response.json();
-      if (data.status === "error") {
-        throw new Error(data.message || "Error al escribir en Staging.");
+        const response = await fetch(webAppUrl, {
+          method: "POST",
+          mode: "cors",
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          body: JSON.stringify({
+            action: "write_staging",
+            records: chunk,
+            batchId: batchId,
+            uploadedBy: uploadedBy
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`Error de servidor: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data.status === "error") {
+          throw new Error(data.message || "Error al escribir en Staging.");
+        }
+
+        appendsCount += chunk.length;
+        const progress = Math.min(100, Math.round((appendsCount / totalRecords) * 100));
+        setUploadProgress(progress);
       }
 
       setUploadProgress(100);
       setUploadStep("¡Ingesta de Staging completada exitosamente!");
       setUploadSuccessInfo({
-        appendsCount: recordsToSend.length,
+        appendsCount: totalRecords,
         overwritesCount: 0,
-        total: recordsToSend.length
+        total: totalRecords
       });
 
       setFile(null);
@@ -1550,9 +1564,41 @@ function App() {
             </div>
 
             {loadingStaging ? (
-              <div className="py-12 flex flex-col items-center justify-center gap-3 text-slate-400">
-                <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
-                <p className="text-xs font-bold uppercase tracking-wider animate-pulse">Obteniendo lotes de Staging...</p>
+              <div className="relative min-h-[280px] w-full animate-fade-in">
+                {/* 3 Premium Skeleton Cards Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 opacity-30 select-none pointer-events-none">
+                  {[1, 2, 3].map((i) => (
+                    <div key={i} className="p-5 bg-white/50 dark:bg-slate-900/40 border border-slate-200/50 dark:border-slate-800/50 rounded-2xl flex flex-col gap-4">
+                      <div className="flex items-center justify-between">
+                        <div className="h-3 bg-slate-300 dark:bg-slate-700 rounded w-1/4 animate-pulse" />
+                        <div className="h-3 bg-slate-300 dark:bg-slate-700 rounded w-1/6 animate-pulse" />
+                      </div>
+                      <div className="h-5 bg-slate-350 dark:bg-slate-750 rounded w-3/4 animate-pulse mt-1" />
+                      <div className="grid grid-cols-2 gap-2 p-3 bg-slate-100/50 dark:bg-slate-800/30 rounded-xl">
+                        <div>
+                          <div className="h-2 bg-slate-300 dark:bg-slate-700 rounded w-1/2 animate-pulse mb-1" />
+                          <div className="h-4 bg-slate-350 dark:bg-slate-750 rounded w-2/3 animate-pulse" />
+                        </div>
+                        <div>
+                          <div className="h-2 bg-slate-300 dark:bg-slate-700 rounded w-1/2 animate-pulse mb-1" />
+                          <div className="h-4 bg-slate-350 dark:bg-slate-750 rounded w-2/3 animate-pulse" />
+                        </div>
+                      </div>
+                      <div className="h-9 bg-slate-350 dark:bg-slate-750 rounded w-full animate-pulse mt-auto" />
+                    </div>
+                  ))}
+                </div>
+                {/* Glassy Spinner overlay */}
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/10 dark:bg-slate-950/15 backdrop-blur-[6px] rounded-2xl transition-all duration-300">
+                  <div className="bg-white/85 dark:bg-slate-900/85 border border-slate-200/40 dark:border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col items-center gap-3">
+                    <div className="relative">
+                      <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
+                      <Database className="w-4 h-4 text-amber-600 dark:text-amber-400 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                    </div>
+                    <p className="text-xs font-black uppercase tracking-wider text-slate-700 dark:text-slate-200 animate-pulse">Sincronizando Staging...</p>
+                    <span className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Espera un momento</span>
+                  </div>
+                </div>
               </div>
             ) : groupedBatches.length === 0 ? (
               <div className="py-12 text-center flex flex-col items-center gap-2">
