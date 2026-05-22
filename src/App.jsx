@@ -81,6 +81,19 @@ function App() {
   const [conflictData, setConflictData] = useState([]);
   const [showConflictResolver, setShowConflictResolver] = useState(false);
   const [uploadSuccessInfo, setUploadSuccessInfo] = useState(null);
+
+  const [processingBatchId, setProcessingBatchId] = useState(null);
+  const [processingAction, setProcessingAction] = useState(null); // 'approve' | 'reject'
+  const [uploadingBatch, setUploadingBatch] = useState(null);
+  const [activeConflictBatchId, setActiveConflictBatchId] = useState(null);
+  const [activeConflictRecords, setActiveConflictRecords] = useState([]);
+
+  const handleCloseConflictResolver = () => {
+    setShowConflictResolver(false);
+    setConflictData([]);
+    setActiveConflictBatchId(null);
+    setActiveConflictRecords([]);
+  };
   
   // Google OAuth 2.0 y Configuración de Roles
   const [user, setUser] = useState(() => {
@@ -359,37 +372,73 @@ function App() {
       return;
     }
 
-    setUploading(true);
-    setUploadProgress(30);
-    setUploadStep(`Aprobando lote "${label}" en el servidor...`);
+    setProcessingBatchId(batchId);
+    setProcessingAction('approve');
 
     try {
-      const response = await fetch(webAppUrl, {
+      const batch = groupedBatches.find(b => b.batchId === batchId);
+      if (!batch) throw new Error("Lote no encontrado localmente.");
+      const folios = batch.records.map(r => String(r.folio).trim());
+
+      const checkRes = await fetch(webAppUrl, {
         method: "POST",
         mode: "cors",
         headers: {
           "Content-Type": "text/plain;charset=utf-8"
         },
         body: JSON.stringify({
-          action: "approve_batch",
-          batchId: batchId
+          action: "check_duplicates",
+          folios: folios
         })
       });
 
-      if (!response.ok) throw new Error(`Servidor: ${response.status}`);
-      const data = await response.json();
-      if (data.status === "error") throw new Error(data.message);
+      if (!checkRes.ok) throw new Error(`Error de red al verificar duplicados: ${checkRes.status}`);
+      const checkData = await checkRes.json();
+      if (checkData.status === "error") throw new Error(checkData.message);
 
-      setUploadProgress(100);
-      setUploadStep("¡Lote aprobado con éxito!");
-      alert(`Se ha aprobado y movido el lote completo con éxito (${data.approvedCount} registros).`);
-      
-      await fetchStagingRecords();
+      if (checkData.duplicates && checkData.duplicates.length > 0) {
+        const mappedConflicts = checkData.duplicates.map(dup => {
+          const matchedStaging = batch.records.find(r => String(r.folio).trim() === String(dup.folio).trim());
+          return {
+            folio: dup.folio,
+            sheetRow: dup.sheetRow,
+            gateRow: matchedStaging ? mapStagingToDevMode(matchedStaging) : {}
+          };
+        });
+
+        setActiveConflictBatchId(batchId);
+        setActiveConflictRecords(batch.records);
+        setConflictData(mappedConflicts);
+        
+        setProcessingBatchId(null);
+        setProcessingAction(null);
+        setShowConflictResolver(true);
+      } else {
+        const response = await fetch(webAppUrl, {
+          method: "POST",
+          mode: "cors",
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          body: JSON.stringify({
+            action: "approve_batch",
+            batchId: batchId
+          })
+        });
+
+        if (!response.ok) throw new Error(`Servidor: ${response.status}`);
+        const data = await response.json();
+        if (data.status === "error") throw new Error(data.message);
+
+        alert(`Se ha aprobado y movido el lote completo con éxito (${data.approvedCount} registros).`);
+        await fetchStagingRecords();
+      }
     } catch (err) {
       console.error("Error approving batch:", err);
       alert(`Error al aprobar lote: ${err.message}`);
     } finally {
-      setUploading(false);
+      setProcessingBatchId(null);
+      setProcessingAction(null);
     }
   };
 
@@ -402,9 +451,8 @@ function App() {
       return;
     }
 
-    setUploading(true);
-    setUploadProgress(30);
-    setUploadStep(`Purgando lote "${label}" en el servidor...`);
+    setProcessingBatchId(batchId);
+    setProcessingAction('reject');
 
     try {
       const response = await fetch(webAppUrl, {
@@ -423,16 +471,14 @@ function App() {
       const data = await response.json();
       if (data.status === "error") throw new Error(data.message);
 
-      setUploadProgress(100);
-      setUploadStep("¡Lote rechazado y purgado!");
       alert(`Se ha purgado el lote completo con éxito (${data.rejectedCount} registros).`);
-      
       await fetchStagingRecords();
     } catch (err) {
       console.error("Error rejecting batch:", err);
       alert(`Error al rechazar lote: ${err.message}`);
     } finally {
-      setUploading(false);
+      setProcessingBatchId(null);
+      setProcessingAction(null);
     }
   };
 
@@ -448,20 +494,24 @@ function App() {
       return;
     }
 
-    setUploading(true);
-    setUploadProgress(0);
-    setUploadStep("Conectando con Google Sheets Staging...");
+    const recordsToSend = allRecords.map(r => mapRowToDevMode(r));
+    const totalRecords = recordsToSend.length;
+
+    const contractId = recordsToSend[0]?.ID || '00';
+    const batchId = `LOTE-${contractId}-${Date.now()}`;
+    const uploadedBy = firebaseUser?.email || user?.email || "Supervisor Anónimo";
+
+    setUploadingBatch({
+      batchId: batchId,
+      progress: 0,
+      step: "Conectando con Google Sheets Staging...",
+      total: totalRecords,
+      current: 0,
+      contractId: contractId,
+      uploadedBy: uploadedBy
+    });
 
     try {
-      const recordsToSend = allRecords.map(r => mapRowToDevMode(r));
-      const totalRecords = recordsToSend.length;
-
-      // Generación del ID único del lote (LOTE-[CONTRATO]-[TIMESTAMP])
-      const contractId = recordsToSend[0]?.ID || '00';
-      const batchId = `LOTE-${contractId}-${Date.now()}`;
-      const uploadedBy = firebaseUser?.email || user?.email || "Supervisor Anónimo";
-
-      // Segmentación en bloques de 150 registros
       const chunkSize = 150;
       let appendsCount = 0;
 
@@ -469,7 +519,13 @@ function App() {
         const chunk = recordsToSend.slice(i, i + chunkSize);
         const chunkStart = i + 1;
         const chunkEnd = Math.min(i + chunkSize, totalRecords);
-        setUploadStep(`Transmitiendo bloque de registros (${chunkStart} a ${chunkEnd} de ${totalRecords})...`);
+        
+        setUploadingBatch(prev => ({
+          ...prev,
+          progress: Math.min(95, Math.round((appendsCount / totalRecords) * 100)),
+          step: `Transmitiendo registros ${chunkStart} a ${chunkEnd} de ${totalRecords}...`,
+          current: appendsCount
+        }));
 
         const response = await fetch(webAppUrl, {
           method: "POST",
@@ -495,17 +551,19 @@ function App() {
         }
 
         appendsCount += chunk.length;
-        const progress = Math.min(100, Math.round((appendsCount / totalRecords) * 100));
-        setUploadProgress(progress);
       }
 
-      setUploadProgress(100);
-      setUploadStep("¡Ingesta de Staging completada exitosamente!");
-      setUploadSuccessInfo({
-        appendsCount: totalRecords,
-        overwritesCount: 0,
-        total: totalRecords
-      });
+      setUploadingBatch(prev => ({
+        ...prev,
+        progress: 100,
+        step: "¡Ingesta de Staging completada exitosamente!"
+      }));
+
+      setTimeout(() => {
+        setUploadingBatch(null);
+        alert(`¡Ingesta de Staging completada exitosamente! Se subieron ${totalRecords} registros en el lote "${batchId}".`);
+        fetchStagingRecords();
+      }, 1000);
 
       setFile(null);
       setAllRecords([]);
@@ -513,8 +571,7 @@ function App() {
     } catch (error) {
       console.error("❌ Error de comunicación con Staging:", error);
       alert(`Error al enviar a Staging: ${error.message}`);
-    } finally {
-      setUploading(false);
+      setUploadingBatch(null);
     }
   };
 
@@ -874,6 +931,44 @@ function App() {
     };
   };
 
+  const mapStagingToDevMode = (s) => {
+    if (!s) return {};
+    let lat = '', lon = '';
+    const geo = s.GEOLOCALIZACION || '';
+    if (geo && geo.includes(',')) {
+      const parts = geo.split(',').map(str => str.trim());
+      if (parts.length === 2) {
+        lat = parts[0];
+        lon = parts[1];
+      }
+    }
+    return {
+      ID: s.ID || '',
+      EMPRESA: s.EMPRESA || '',
+      idEmpresa: '',
+      idResponsable: '',
+      idDocRef: '',
+      tipoDocRef: s.tipoDocRef || '',
+      folioRef: s.folio || '',
+      idBacheo: '',
+      idDelegacion: '',
+      fecha: s.fecha || '',
+      estatus: 'T',
+      folio: s.folio || '',
+      latitude: lat,
+      longitude: lon,
+      GEOLOCALIZACION: geo,
+      calle: s.calle || '',
+      delegacion: s.delegacion || '',
+      colonia: s.colonia || '',
+      tipo: s.tipo || '',
+      largo: s.largo || '',
+      ancho: s.ancho || '',
+      profundidad: s.profundidad || '',
+      m2total: s.m2total || ''
+    };
+  };
+
   const handleDatabaseSend = async () => {
     if (!webAppUrl) {
       alert("Por favor, configura la URL de la Web App de Google Apps Script primero.");
@@ -1002,15 +1097,63 @@ function App() {
 
   const handleResolveConflicts = async (appends, overwrites) => {
     setShowConflictResolver(false);
-    // Filtrar los registros que no están en conflicto y agregarlos a los appends
-    const conflictFoliosSet = new Set(conflictData.map(c => c.folio));
-    const nonConflictAppends = allRecords
-      .filter(r => !conflictFoliosSet.has(String(r.folio).trim()))
-      .map(r => mapRowToDevMode(r));
-
-    const totalAppends = [...appends, ...nonConflictAppends];
     
-    await executeWriteRecords(totalAppends, overwrites);
+    if (activeConflictBatchId) {
+      const batchId = activeConflictBatchId;
+      const records = activeConflictRecords;
+      
+      const conflictFoliosSet = new Set(conflictData.map(c => c.folio));
+      const nonConflictAppends = records
+        .filter(r => !conflictFoliosSet.has(String(r.folio).trim()))
+        .map(r => mapStagingToDevMode(r));
+        
+      const totalAppends = [...appends, ...nonConflictAppends];
+      
+      setActiveConflictBatchId(null);
+      setActiveConflictRecords([]);
+      setConflictData([]);
+      
+      setProcessingBatchId(batchId);
+      setProcessingAction('approve');
+      
+      try {
+        const response = await fetch(webAppUrl, {
+          method: "POST",
+          mode: "cors",
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          body: JSON.stringify({
+            action: "approve_batch_resolved",
+            batchId: batchId,
+            appends: totalAppends,
+            overwrites: overwrites
+          })
+        });
+        
+        if (!response.ok) throw new Error(`Servidor: ${response.status}`);
+        const data = await response.json();
+        if (data.status === "error") throw new Error(data.message);
+        
+        alert(`Lote "${batchId}" aprobado con resolución de conflictos. Se insertaron ${data.appendsCount || 0} y sobreescribieron ${data.overwritesCount || 0} registros.`);
+        await fetchStagingRecords();
+      } catch (err) {
+        console.error("Error approving resolved batch:", err);
+        alert(`Error al aprobar lote con resolución: ${err.message}`);
+      } finally {
+        setProcessingBatchId(null);
+        setProcessingAction(null);
+      }
+      
+    } else {
+      const conflictFoliosSet = new Set(conflictData.map(c => c.folio));
+      const nonConflictAppends = allRecords
+        .filter(r => !conflictFoliosSet.has(String(r.folio).trim()))
+        .map(r => mapRowToDevMode(r));
+
+      const totalAppends = [...appends, ...nonConflictAppends];
+      await executeWriteRecords(totalAppends, overwrites);
+    }
   };
 
   const validateRecord = (row, geoData, currentDominant = dominantContract) => {
@@ -1610,12 +1753,53 @@ function App() {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {uploadingBatch && (
+                  <div className="relative overflow-hidden p-5 bg-gradient-to-br from-amber-500/10 to-indigo-500/10 dark:from-amber-500/20 dark:to-indigo-500/20 border border-amber-500/30 dark:border-amber-500/20 rounded-2xl shadow-lg backdrop-blur-md flex flex-col gap-4 animate-pulse">
+                    {/* Animated shine line on top */}
+                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-amber-400 via-pink-500 to-indigo-500" />
+                    
+                    <div className="flex flex-col gap-1 pl-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[8px] font-black uppercase px-2 py-0.5 rounded tracking-widest bg-amber-500 text-white flex items-center gap-1">
+                          <Loader2 className="w-2.5 h-2.5 animate-spin" /> SUBIENDO LOTE
+                        </span>
+                        <span className="text-[10px] font-mono font-bold text-amber-600 dark:text-amber-400">
+                          {uploadingBatch.current} / {uploadingBatch.total}
+                        </span>
+                      </div>
+                      <h4 className="text-xs font-black text-slate-800 dark:text-slate-100 truncate mt-1">
+                        {uploadingBatch.batchId}
+                      </h4>
+                    </div>
+
+                    <div className="flex flex-col gap-2 pl-2 bg-white/40 dark:bg-slate-900/30 p-3 rounded-xl border border-white/20 dark:border-slate-800/50">
+                      <div className="flex justify-between items-center text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider">
+                        <span>Contrato {uploadingBatch.contractId}</span>
+                        <span className="lowercase truncate max-w-[85px]">{uploadingBatch.uploadedBy}</span>
+                      </div>
+                      <p className="text-[9px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-widest mt-1 truncate">
+                        {uploadingBatch.step}
+                      </p>
+                      
+                      {/* Glassy Progress Bar */}
+                      <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-2 mt-1.5 overflow-hidden">
+                        <div 
+                          className="bg-gradient-to-r from-amber-500 to-indigo-600 h-full rounded-full transition-all duration-300"
+                          style={{ width: `${uploadingBatch.progress}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {groupedBatches.map((lote) => {
                   const label = lote.batchId === "LOTE-HISTORICO" ? "Lote Histórico / Sin Identificar" : lote.batchId;
                   const isHistorical = lote.batchId === "LOTE-HISTORICO";
                   const dateFormatted = lote.timestamp ? new Date(lote.timestamp).toLocaleString('es-MX', {
                     day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
                   }) : 'Fecha no identificada';
+                  
+                  const isProcessing = processingBatchId === lote.batchId;
                   
                   return (
                     <div 
@@ -1667,23 +1851,42 @@ function App() {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 mt-auto pl-2">
-                        <button
-                          type="button"
-                          onClick={() => handleApproveBatch(lote.batchId, lote.records.length)}
-                          className="flex-grow py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all hover:-translate-y-0.5 active:translate-y-0 shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                          <span className="material-symbols-outlined text-xs">done</span>
-                          Aprobar Lote
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleRejectBatch(lote.batchId, lote.records.length)}
-                          className="py-2.5 px-3.5 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all hover:-translate-y-0.5 active:translate-y-0 shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
-                          title="Rechazar Lote"
-                        >
-                          <span className="material-symbols-outlined text-xs">delete</span>
-                        </button>
+                      <div className="flex items-center gap-2 mt-auto pl-2 min-h-[38px]">
+                        {isProcessing ? (
+                          <div className="w-full py-2 bg-slate-100 dark:bg-slate-800 rounded-xl flex items-center justify-center gap-2 border border-slate-200/50 dark:border-slate-700/50 animate-pulse">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" />
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-600 dark:text-slate-350">
+                              {processingAction === 'approve' ? 'Aprobando...' : 'Rechazando...'}
+                            </span>
+                          </div>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleApproveBatch(lote.batchId, lote.records.length)}
+                              disabled={!!processingBatchId || !!uploadingBatch}
+                              className={`flex-grow py-2.5 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer
+                                ${(processingBatchId || uploadingBatch) 
+                                  ? 'bg-slate-300 dark:bg-slate-700 text-slate-500 dark:text-slate-400 cursor-not-allowed transform-none hover:transform-none shadow-none'
+                                  : 'bg-emerald-600 hover:bg-emerald-700 hover:-translate-y-0.5 active:translate-y-0'}`}
+                            >
+                              <span className="material-symbols-outlined text-xs">done</span>
+                              Aprobar Lote
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRejectBatch(lote.batchId, lote.records.length)}
+                              disabled={!!processingBatchId || !!uploadingBatch}
+                              className={`py-2.5 px-3.5 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer
+                                ${(processingBatchId || uploadingBatch)
+                                  ? 'bg-slate-300 dark:bg-slate-700 text-slate-500 dark:text-slate-400 cursor-not-allowed transform-none hover:transform-none shadow-none'
+                                  : 'bg-rose-500 hover:bg-rose-600 hover:-translate-y-0.5 active:translate-y-0'}`}
+                              title="Rechazar Lote"
+                            >
+                              <span className="material-symbols-outlined text-xs">delete</span>
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
@@ -2258,7 +2461,7 @@ function App() {
         {/* Conflict Resolver Modal */}
         <ConflictResolverModal
           isOpen={showConflictResolver}
-          onClose={() => { setShowConflictResolver(false); setConflictData([]); }}
+          onClose={handleCloseConflictResolver}
           conflicts={conflictData}
           dominantContract={dominantContract}
           onResolve={handleResolveConflicts}
