@@ -70,7 +70,7 @@ function App() {
   
   // Configuración interna de Toluca Capital.
   // Las claves sensibles y de producción quedan totalmente integradas internamente para evitar que se tenga que configurar de forma externa por operarios.
-  const webAppUrl = "https://script.google.com/macros/s/AKfycbwvvlAjidRikGn1TUrgCVnCUsdE8dHekx747qW9FA4hJJiUwKlnRQ1qq7yQG5LhWHpBhw/exec";
+  const webAppUrl = "https://script.google.com/macros/s/AKfycbyy0qJm17Cg7-Yi47AjQ1YnQqIf-2141mSUS8eMWxZeObid8-AlEKMFqbnGqQ9-XqvDvw/exec";
   const googleClientId = "495027610202-h2eteem4ru03kofuh5upmf55nbggf6pt.apps.googleusercontent.com";
   const supervisorsSpreadsheetId = "1pn3MyKxq9Kxm_IGFbksCBa5rxlsNyw-DgvwjRDhXCNE";
 
