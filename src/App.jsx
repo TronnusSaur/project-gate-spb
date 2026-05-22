@@ -95,11 +95,83 @@ function App() {
   const adminMode = useMemo(() => {
     return user && user.email === 'juanpablobumblebee@gmail.com';
   }, [user]);
+
+  // ==========================================
+  // ARQUITECTURA DE FIREBASE (CONFIGURACIÓN & PREPARACIÓN)
+  // ==========================================
+  // Para activar Firebase Auth/Firestore en el futuro:
+  // 1. Instalar dependencias: npm install firebase
+  // 2. Importar al inicio de App.jsx:
+  //    import { initializeApp } from 'firebase/app';
+  //    import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
+  //    import { getFirestore, collection, addDoc, getDocs } from 'firebase/firestore';
+  // 3. Rellenar las claves reales en firebaseConfig.
+  const firebaseConfig = {
+    apiKey: "AIzaSyFakeKey-Placeholder123456789",
+    authDomain: "project-gate-toluca.firebaseapp.com",
+    projectId: "project-gate-toluca",
+    storageBucket: "project-gate-toluca.appspot.com",
+    messagingSenderId: "123456789012",
+    appId: "1:123456789012:web:abcdef123456"
+  };
+
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [loadingAuth, setLoadingAuth] = useState(false);
+
+  useEffect(() => {
+    console.log("Firebase initialized with architecture placeholder:", firebaseConfig.projectId);
+  }, []);
   
   // Bandeja de Aprobaciones (Staging)
   const [stagingRecords, setStagingRecords] = useState([]);
   const [loadingStaging, setLoadingStaging] = useState(false);
   const [selectedStagingFolios, setSelectedStagingFolios] = useState([]);
+
+  // Agrupamiento lógico de folios en lotes
+  const groupedBatches = useMemo(() => {
+    const groups = {};
+    stagingRecords.forEach(r => {
+      const bid = r.BATCH_ID || "LOTE-HISTORICO";
+      const uby = r.UPLOADED_BY || "Supervisor Anónimo";
+      const ts = r.TIMESTAMP_STAGING || null;
+      
+      if (!groups[bid]) {
+        groups[bid] = {
+          batchId: bid,
+          uploadedBy: uby,
+          timestamp: ts,
+          contractId: r.ID || r['No. Contrato'] || "Varios",
+          records: []
+        };
+      }
+      groups[bid].records.push(r);
+      
+      const currentContract = r.ID || r['No. Contrato'];
+      if (currentContract && groups[bid].contractId !== currentContract) {
+        if (groups[bid].contractId === "Varios") {
+          // keep it
+        } else {
+          if (!groups[bid].contractId) {
+            groups[bid].contractId = currentContract;
+          } else {
+            groups[bid].contractId = "Varios";
+          }
+        }
+      }
+      
+      if (!groups[bid].timestamp && ts) {
+        groups[bid].timestamp = ts;
+      }
+    });
+    
+    return Object.values(groups).sort((a, b) => {
+      if (a.batchId === "LOTE-HISTORICO") return 1;
+      if (b.batchId === "LOTE-HISTORICO") return -1;
+      if (!a.timestamp) return 1;
+      if (!b.timestamp) return -1;
+      return new Date(b.timestamp) - new Date(a.timestamp);
+    });
+  }, [stagingRecords]);
   
   const inputRef = useRef(null);
 
@@ -278,6 +350,92 @@ function App() {
     }
   };
 
+  const handleApproveBatch = async (batchId, count) => {
+    if (!webAppUrl) return;
+    if (!batchId) return;
+
+    const label = batchId === "LOTE-HISTORICO" ? "Lote Histórico / Sin Identificar" : batchId;
+    if (!window.confirm(`¿Estás seguro de que deseas APROBAR el lote completo "${label}" (${count} registros) y moverlos a la base de datos central?`)) {
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(30);
+    setUploadStep(`Aprobando lote "${label}" en el servidor...`);
+
+    try {
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "approve_batch",
+          batchId: batchId
+        })
+      });
+
+      if (!response.ok) throw new Error(`Servidor: ${response.status}`);
+      const data = await response.json();
+      if (data.status === "error") throw new Error(data.message);
+
+      setUploadProgress(100);
+      setUploadStep("¡Lote aprobado con éxito!");
+      alert(`Se ha aprobado y movido el lote completo con éxito (${data.approvedCount} registros).`);
+      
+      await fetchStagingRecords();
+    } catch (err) {
+      console.error("Error approving batch:", err);
+      alert(`Error al aprobar lote: ${err.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleRejectBatch = async (batchId, count) => {
+    if (!webAppUrl) return;
+    if (!batchId) return;
+
+    const label = batchId === "LOTE-HISTORICO" ? "Lote Histórico / Sin Identificar" : batchId;
+    if (!window.confirm(`¿Estás seguro de que deseas RECHAZAR y purgar el lote completo "${label}" (${count} registros)? Esta acción eliminará los registros definitivamente.`)) {
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(30);
+    setUploadStep(`Purgando lote "${label}" en el servidor...`);
+
+    try {
+      const response = await fetch(webAppUrl, {
+        method: "POST",
+        mode: "cors",
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8"
+        },
+        body: JSON.stringify({
+          action: "reject_batch",
+          batchId: batchId
+        })
+      });
+
+      if (!response.ok) throw new Error(`Servidor: ${response.status}`);
+      const data = await response.json();
+      if (data.status === "error") throw new Error(data.message);
+
+      setUploadProgress(100);
+      setUploadStep("¡Lote rechazado y purgado!");
+      alert(`Se ha purgado el lote completo con éxito (${data.rejectedCount} registros).`);
+      
+      await fetchStagingRecords();
+    } catch (err) {
+      console.error("Error rejecting batch:", err);
+      alert(`Error al rechazar lote: ${err.message}`);
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const handleExportStaging = async () => {
     if (!webAppUrl) {
       alert("Por favor, configura la URL de la Web App de Google Apps Script primero.");
@@ -299,6 +457,11 @@ function App() {
       setUploadProgress(50);
       setUploadStep("Transmitiendo registros a la pestaña STAGING_MASTER...");
 
+      // Generación del ID único del lote (LOTE-[CONTRATO]-[TIMESTAMP])
+      const contractId = recordsToSend[0]?.ID || '00';
+      const batchId = `LOTE-${contractId}-${Date.now()}`;
+      const uploadedBy = firebaseUser?.email || user?.email || "Supervisor Anónimo";
+
       const response = await fetch(webAppUrl, {
         method: "POST",
         mode: "cors",
@@ -307,7 +470,9 @@ function App() {
         },
         body: JSON.stringify({
           action: "write_staging",
-          records: recordsToSend
+          records: recordsToSend,
+          batchId: batchId,
+          uploadedBy: uploadedBy
         })
       });
 
@@ -1361,7 +1526,7 @@ function App() {
                     </span>
                   </h3>
                   <p className="text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-widest mt-0.5">
-                    Control de Ingesta Intermedia STAGING_MASTER
+                    Control de Ingesta Intermedia por Lotes
                   </p>
                 </div>
               </div>
@@ -1379,35 +1544,7 @@ function App() {
                   ) : (
                     <span className="material-symbols-outlined text-sm">refresh</span>
                   )}
-                  <span>Actualizar ({stagingRecords.length})</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleApproveStaging()}
-                  disabled={selectedStagingFolios.length === 0}
-                  className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-md cursor-pointer
-                    ${selectedStagingFolios.length === 0
-                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 cursor-not-allowed shadow-none border-transparent'
-                      : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/10 hover:-translate-y-0.5 active:translate-y-0'
-                    }`}
-                >
-                  <span className="material-symbols-outlined text-sm">done_all</span>
-                  <span>Aprobar ({selectedStagingFolios.length})</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleRejectStaging()}
-                  disabled={selectedStagingFolios.length === 0}
-                  className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all border cursor-pointer
-                    ${selectedStagingFolios.length === 0
-                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-400 border-transparent cursor-not-allowed'
-                      : 'bg-rose-500 hover:bg-rose-600 text-white border-rose-600 hover:shadow-rose-500/10 hover:-translate-y-0.5 active:translate-y-0'
-                    }`}
-                >
-                  <span className="material-symbols-outlined text-sm">delete_sweep</span>
-                  <span>Rechazar ({selectedStagingFolios.length})</span>
+                  <span>Actualizar Lotes ({groupedBatches.length})</span>
                 </button>
               </div>
             </div>
@@ -1415,108 +1552,96 @@ function App() {
             {loadingStaging ? (
               <div className="py-12 flex flex-col items-center justify-center gap-3 text-slate-400">
                 <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
-                <p className="text-xs font-bold uppercase tracking-wider animate-pulse">Obteniendo base de Staging...</p>
+                <p className="text-xs font-bold uppercase tracking-wider animate-pulse">Obteniendo lotes de Staging...</p>
               </div>
-            ) : stagingRecords.length === 0 ? (
+            ) : groupedBatches.length === 0 ? (
               <div className="py-12 text-center flex flex-col items-center gap-2">
                 <div className="w-12 h-12 bg-emerald-500/10 text-emerald-500 rounded-full flex items-center justify-center mb-1">
                   <span className="material-symbols-outlined text-2xl">done</span>
                 </div>
                 <p className="text-sm font-black text-slate-700 dark:text-slate-300">¡Bandeja completamente limpia!</p>
-                <p className="text-xs text-slate-400">No hay registros pendientes de aprobación en STAGING_MASTER.</p>
+                <p className="text-xs text-slate-400">No hay lotes de bacheo pendientes de aprobación en Staging.</p>
               </div>
             ) : (
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-wider">
-                  <span>Selección: {selectedStagingFolios.length} de {stagingRecords.length} folios</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (selectedStagingFolios.length === stagingRecords.length) {
-                        setSelectedStagingFolios([]);
-                      } else {
-                        setSelectedStagingFolios(stagingRecords.map(r => String(r.folio)));
-                      }
-                    }}
-                    className="text-primary hover:underline text-[9px] cursor-pointer"
-                  >
-                    {selectedStagingFolios.length === stagingRecords.length ? 'Deseleccionar Todos' : 'Seleccionar Todos'}
-                  </button>
-                </div>
-
-                <div className="overflow-x-auto max-h-[350px] custom-scrollbar border border-slate-100 dark:border-slate-800/80 rounded-2xl">
-                  <table className="w-full text-left text-sm">
-                    <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900 text-slate-500 dark:text-slate-400 z-10">
-                      <tr className="border-b border-slate-200 dark:border-slate-800">
-                        <th className="py-2.5 px-3 w-10 text-center">
-                          <input
-                            type="checkbox"
-                            checked={selectedStagingFolios.length === stagingRecords.length && stagingRecords.length > 0}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedStagingFolios(stagingRecords.map(r => String(r.folio)));
-                              } else {
-                                setSelectedStagingFolios([]);
-                              }
-                            }}
-                            className="rounded border-slate-300 text-amber-500 focus:ring-amber-500/20 cursor-pointer"
-                          />
-                        </th>
-                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Contrato</th>
-                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Folio</th>
-                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Vía / Calle</th>
-                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Colonia</th>
-                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Delegación</th>
-                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Área m²</th>
-                        <th className="py-2.5 px-2 text-[9px] uppercase tracking-wider font-extrabold">Fecha Carga</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800 bg-white/50 dark:bg-slate-900/50">
-                      {stagingRecords.map((r, i) => {
-                        const isChecked = selectedStagingFolios.includes(String(r.folio));
-                        const dateFormatted = r.TIMESTAMP_STAGING ? new Date(r.TIMESTAMP_STAGING).toLocaleString('es-MX', {
-                          day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
-                        }) : '---';
-
-                        return (
-                          <tr
-                            key={i}
-                            className={`hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors cursor-pointer ${isChecked ? 'bg-amber-500/5' : ''}`}
-                            onClick={() => {
-                              setSelectedStagingFolios(prev =>
-                                isChecked
-                                  ? prev.filter(f => f !== String(r.folio))
-                                  : [...prev, String(r.folio)]
-                              );
-                            }}
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {groupedBatches.map((lote) => {
+                  const label = lote.batchId === "LOTE-HISTORICO" ? "Lote Histórico / Sin Identificar" : lote.batchId;
+                  const isHistorical = lote.batchId === "LOTE-HISTORICO";
+                  const dateFormatted = lote.timestamp ? new Date(lote.timestamp).toLocaleString('es-MX', {
+                    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+                  }) : 'Fecha no identificada';
+                  
+                  return (
+                    <div 
+                      key={lote.batchId} 
+                      className={`relative overflow-hidden p-5 bg-white/70 dark:bg-slate-900/60 border rounded-2xl shadow-sm transition-all duration-300 hover:shadow-md flex flex-col gap-4 group/card
+                        ${isHistorical 
+                          ? 'border-slate-200 dark:border-slate-800' 
+                          : 'border-amber-500/20 dark:border-amber-500/10 shadow-sm'}`}
+                    >
+                      {/* Accent decoration */}
+                      <div className={`absolute top-0 left-0 w-1.5 h-full ${isHistorical ? 'bg-slate-400 dark:bg-slate-700' : 'bg-amber-500'}`} />
+                      
+                      <div className="flex flex-col gap-1 pl-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className={`text-[8px] font-black uppercase px-2 py-0.5 rounded tracking-widest
+                            ${isHistorical 
+                              ? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400' 
+                              : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'}`}
                           >
-                            <td className="py-2 px-3 text-center" onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={(e) => {
-                                  setSelectedStagingFolios(prev =>
-                                    e.target.checked
-                                      ? [...prev, String(r.folio)]
-                                      : prev.filter(f => f !== String(r.folio))
-                                  );
-                                }}
-                                className="rounded border-slate-300 text-amber-500 focus:ring-amber-500/20 cursor-pointer"
-                              />
-                            </td>
-                            <td className="py-2 px-2 text-xs font-semibold text-slate-500">{String(r.ID || '').padStart(2, '0')}</td>
-                            <td className="py-2 px-2 text-xs font-black text-slate-800 dark:text-slate-200">{r.folio}</td>
-                            <td className="py-2 px-2 text-xs text-slate-700 dark:text-slate-300 truncate max-w-[140px] font-sans font-medium" title={r.calle}>{r.calle || '---'}</td>
-                            <td className="py-2 px-2 text-xs text-slate-600 dark:text-slate-400 truncate max-w-[130px]" title={r.colonia}>{r.colonia || '---'}</td>
-                            <td className="py-2 px-2 text-xs text-slate-600 dark:text-slate-400 truncate max-w-[130px]" title={r.delegacion}>{r.delegacion || '---'}</td>
-                            <td className="py-2 px-2 text-xs font-mono font-bold text-slate-600 dark:text-slate-400">{r.m2total ? `${parseFloat(r.m2total).toFixed(2)} m²` : '---'}</td>
-                            <td className="py-2 px-2 text-[10px] text-slate-400 font-medium font-mono">{dateFormatted}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                            {isHistorical ? 'HISTÓRICO' : 'LOTE NUEVO'}
+                          </span>
+                          <span className="text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500">
+                            {lote.records.length} {lote.records.length === 1 ? 'folio' : 'folios'}
+                          </span>
+                        </div>
+                        <h4 className="text-xs font-black text-slate-800 dark:text-slate-100 truncate mt-1" title={label}>
+                          {label}
+                        </h4>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-[10px] pl-2 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider bg-slate-50/50 dark:bg-slate-800/20 p-3 rounded-xl">
+                        <div>
+                          <p className="text-[8px] text-slate-450 dark:text-slate-500 uppercase tracking-widest font-black">Contrato</p>
+                          <p className="text-xs font-black text-slate-700 dark:text-slate-300 mt-0.5">
+                            {lote.contractId === "Varios" ? "Varios" : String(lote.contractId).padStart(2, '0')}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[8px] text-slate-450 dark:text-slate-500 uppercase tracking-widest font-black">Remitente</p>
+                          <p className="text-xs font-black text-slate-700 dark:text-slate-300 mt-0.5 truncate" title={lote.uploadedBy}>
+                            {lote.uploadedBy}
+                          </p>
+                        </div>
+                        <div className="col-span-2 mt-1 border-t border-slate-100 dark:border-slate-800 pt-1">
+                          <p className="text-[8px] text-slate-450 dark:text-slate-500 uppercase tracking-widest font-black">Fecha de Carga</p>
+                          <p className="text-[10px] font-mono font-bold text-slate-600 dark:text-slate-400 mt-0.5">
+                            {dateFormatted}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 mt-auto pl-2">
+                        <button
+                          type="button"
+                          onClick={() => handleApproveBatch(lote.batchId, lote.records.length)}
+                          className="flex-grow py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all hover:-translate-y-0.5 active:translate-y-0 shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-xs">done</span>
+                          Aprobar Lote
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRejectBatch(lote.batchId, lote.records.length)}
+                          className="py-2.5 px-3.5 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition-all hover:-translate-y-0.5 active:translate-y-0 shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                          title="Rechazar Lote"
+                        >
+                          <span className="material-symbols-outlined text-xs">delete</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
